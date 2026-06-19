@@ -9,6 +9,7 @@ import mosquitto_nim/worker/types
 import mosquitto_nim/worker/mosquitto_worker
 import mosquitto_nim/highlevel/async_bridge
 import mosquitto_nim/highlevel/client as highlevel_client
+import mosquitto_nim/highlevel/dispatcher
 import mosquitto_nim/lowlevel/bridge
 import mosquitto_nim/lowlevel/bindings/c_api
 
@@ -341,6 +342,84 @@ suite "mosquitto_nim highlevel client":
       check client.joinMqttClient().isOk
       let pubRes = client.publish("mosquitto_nim/closed", "nope", qos0)
       check pubRes.isErr
+
+
+
+suite "mosquitto_nim highlevel dispatcher":
+  test "topic filter matcher follows MQTT wildcard basics":
+    check topicFilterMatches("mosquitto_nim/+/value", "mosquitto_nim/device1/value")
+    check not topicFilterMatches("mosquitto_nim/+/value", "mosquitto_nim/device1/status")
+    check topicFilterMatches("mosquitto_nim/#", "mosquitto_nim")
+    check topicFilterMatches("mosquitto_nim/#", "mosquitto_nim/device1/value")
+    check not topicFilterMatches("#", "$SYS/broker/version")
+    check topicFilterMatches("$SYS/#", "$SYS/broker/version")
+
+  test "dispatcher invokes matching synchronous handlers only":
+    let dispatcher = newMqttDispatcher()
+    var received: seq[string] = @[]
+
+    let handler: MqttMessageHandler = proc(message: MqttMessage) =
+      received.add(message.topic & "=" & message.payloadString())
+
+    let addRes = dispatcher.addMessageHandler("mosquitto_nim/+/dispatch", handler)
+    check addRes.isOk
+    check dispatcher.handlerCount() == 1
+
+    let missMsg = MqttMessage(
+      topic: "mosquitto_nim/device1/other",
+      payload: bytesFromString("miss"),
+      qos: qos0
+    )
+    let missCount = waitFor dispatcher.dispatchMessage(missMsg)
+    check missCount.isOk
+    check missCount.get() == 0
+    check received.len == 0
+
+    let hitMsg = MqttMessage(
+      topic: "mosquitto_nim/device1/dispatch",
+      payload: bytesFromString("hit"),
+      qos: qos1
+    )
+    let hitCount = waitFor dispatcher.dispatchMessage(hitMsg)
+    check hitCount.isOk
+    check hitCount.get() == 1
+    check received == @["mosquitto_nim/device1/dispatch=hit"]
+
+    let removeRes = dispatcher.removeMessageHandler(addRes.get())
+    check removeRes.isOk
+    check removeRes.get()
+    check dispatcher.handlerCount() == 0
+
+  test "dispatcher awaits async handlers sequentially":
+    proc scenario(): Future[bool] {.async.} =
+      let dispatcher = newMqttDispatcher()
+      var trace: seq[string] = @[]
+
+      let asyncHandler: MqttAsyncMessageHandler = proc(message: MqttMessage): Future[void] {.async.} =
+        trace.add("begin:" & message.payloadString())
+        await sleepAsync(1)
+        trace.add("end:" & message.payloadString())
+
+      let addRes = dispatcher.addMessageHandler("mosquitto_nim/async/#", asyncHandler)
+      check addRes.isOk
+      if addRes.isErr:
+        return false
+
+      let msg = MqttMessage(
+        topic: "mosquitto_nim/async/dispatch",
+        payload: bytesFromString("payload"),
+        qos: qos0
+      )
+      let countRes = await dispatcher.dispatchEvent(messageReceivedEvent(msg))
+      check countRes.isOk
+      if countRes.isErr:
+        return false
+
+      check countRes.get() == 1
+      check trace == @["begin:payload", "end:payload"]
+      return countRes.get() == 1 and trace == @["begin:payload", "end:payload"]
+
+    check waitFor scenario()
 
 when getEnv("MOSQUITTO_NIM_TEST_BROKER") == "1":
   suite "mosquitto_nim lowlevel broker smoke test":
