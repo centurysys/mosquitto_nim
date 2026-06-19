@@ -157,13 +157,13 @@ suite "mosquitto_nim worker lifecycle":
       check worker.joinMqttWorker().isOk
       check not worker.isStarted
 
-  test "worker reports unimplemented commands as error events":
-    let workerRes = startMqttWorker("mosquitto_nim_step6_worker_error")
+  test "worker reports invalid connect commands as error events":
+    let workerRes = startMqttWorker("mosquitto_nim_step7_worker_error")
     check workerRes.isOk
 
     if workerRes.isOk:
       let worker = workerRes.get()
-      check worker.sendCommand(connectCommand("127.0.0.1", id = 91)).isOk
+      check worker.sendCommand(connectCommand("", id = 91)).isOk
       check worker.requestStop(id = 92).isOk
 
       var sawError = false
@@ -178,7 +178,7 @@ suite "mosquitto_nim worker lifecycle":
           of mevError:
             if event.commandId == 91:
               sawError = true
-              check event.error.kind == meInvalidState
+              check event.error.kind == meInvalidArgument
           of mevStopped:
             if event.commandId == 92:
               sawStopped = true
@@ -268,3 +268,119 @@ when getEnv("MOSQUITTO_NIM_TEST_BROKER") == "1":
       discard disconnectLowLevelClient(client)
       discard closeLowLevelClient(client)
       check cleanupLibrary().isOk
+
+
+    test "worker can connect, subscribe, publish, receive, disconnect, and stop":
+      let host = getEnv("MOSQUITTO_NIM_TEST_HOST", "127.0.0.1")
+      let port = parseInt(getEnv("MOSQUITTO_NIM_TEST_PORT", "1883"))
+      let topic = "mosquitto_nim/step7/worker/" & $getTime().toUnix() & "_" & $getCurrentProcessId()
+
+      let workerRes = startMqttWorker("mosquitto_nim_step7_worker", loopTimeoutMs = 10)
+      check workerRes.isOk
+
+      if workerRes.isOk:
+        let worker = workerRes.get()
+        check worker.sendCommand(connectCommand(host, port = port, keepalive = 30, id = 201)).isOk
+
+        var sawConnected = false
+        for _ in 0 ..< 200:
+          var event: MqttEvent
+          let recvRes = worker.tryReceiveEvent(event)
+          check recvRes.isOk
+          if recvRes.isOk and recvRes.get():
+            case event.kind
+            of mevConnected:
+              if event.commandId == 201:
+                sawConnected = true
+                break
+            of mevError:
+              checkpoint event.summary()
+            else:
+              discard
+          sleep(10)
+        check sawConnected
+
+        check worker.sendCommand(subscribeCommand(topic, qos1, id = 202)).isOk
+        var sawSubscribed = false
+        for _ in 0 ..< 200:
+          var event: MqttEvent
+          let recvRes = worker.tryReceiveEvent(event)
+          check recvRes.isOk
+          if recvRes.isOk and recvRes.get():
+            case event.kind
+            of mevSubscribed:
+              if event.commandId == 202:
+                sawSubscribed = true
+                break
+            of mevError:
+              checkpoint event.summary()
+            else:
+              discard
+          sleep(10)
+        check sawSubscribed
+
+        # Give the worker a few loop iterations to flush SUBSCRIBE before PUBLISH.
+        sleep(100)
+
+        check worker.sendCommand(publishCommand(topic, "hello-worker", qos1, retain = false, id = 203)).isOk
+
+        var sawPublished = false
+        var sawMessage = false
+        for _ in 0 ..< 300:
+          var event: MqttEvent
+          let recvRes = worker.tryReceiveEvent(event)
+          check recvRes.isOk
+          if recvRes.isOk and recvRes.get():
+            case event.kind
+            of mevPublished:
+              if event.commandId == 203:
+                sawPublished = true
+            of mevMessageReceived:
+              if event.message.topic == topic:
+                sawMessage = true
+                check event.message.payloadString() == "hello-worker"
+                check event.message.qos == qos1
+            of mevError:
+              checkpoint event.summary()
+            else:
+              discard
+
+            if sawPublished and sawMessage:
+              break
+          sleep(10)
+
+        check sawPublished
+        check sawMessage
+
+        check worker.sendCommand(disconnectCommand(id = 204)).isOk
+        var sawDisconnected = false
+        for _ in 0 ..< 100:
+          var event: MqttEvent
+          let recvRes = worker.tryReceiveEvent(event)
+          check recvRes.isOk
+          if recvRes.isOk and recvRes.get():
+            case event.kind
+            of mevDisconnected:
+              if event.commandId == 204:
+                sawDisconnected = true
+                break
+            of mevError:
+              checkpoint event.summary()
+            else:
+              discard
+          sleep(10)
+        check sawDisconnected
+
+        check worker.requestStop(id = 205).isOk
+        var sawStopped = false
+        for _ in 0 ..< 100:
+          var event: MqttEvent
+          let recvRes = worker.tryReceiveEvent(event)
+          check recvRes.isOk
+          if recvRes.isOk and recvRes.get():
+            if event.kind == mevStopped and event.commandId == 205:
+              sawStopped = true
+              break
+          sleep(10)
+        check sawStopped
+        check worker.joinMqttWorker().isOk

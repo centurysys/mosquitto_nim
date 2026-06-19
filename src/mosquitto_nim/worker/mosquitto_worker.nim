@@ -1,6 +1,6 @@
 # Destination: src/mosquitto_nim/worker/mosquitto_worker.nim
 
-import std/[os, strformat, typedthreads]
+import std/[os, options, strformat, typedthreads]
 
 import results
 import threadtools
@@ -8,25 +8,27 @@ import threadtools
 import ../lowlevel/client
 import ../lowlevel/errors
 import ../lowlevel/library
+import ../lowlevel/types
 import ./types
 
 # ------------------------------------------------------------------------------
-# MQTT worker thread shell.
+# MQTT worker thread.
 #
-# This module is the first threadtools-based layer.  It owns the command/event
-# queues and starts a Nim-managed worker thread.  The worker creates and destroys
-# the LowLevelClient inside the worker thread, so the libmosquitto handle does not
-# cross the public API boundary.
+# This module owns a Nim-managed worker thread.  The worker creates the
+# LowLevelClient inside that thread and keeps the libmosquitto handle there for
+# its whole lifetime.  Callers communicate with the worker only through
+# threadtools queues carrying pure Nim MqttCommand/MqttEvent values.
 #
-# This step intentionally implements only start/stop and unknown-command error
-# reporting.  Network commands are wired in a later step after the worker
-# lifecycle is proven stable.
+# This step implements manual-loop Connect/Disconnect/Publish/Subscribe/
+# Unsubscribe command handling.  It still does not use libmosquitto's internal
+# threaded interface.
 # ------------------------------------------------------------------------------
 type
   MqttWorkerArgs = object
     clientId: string
     cleanSession: bool
     idleSleepMs: int
+    loopTimeoutMs: int
     commandQueue: ThreadQueue[MqttCommand]
     eventQueue: ThreadQueue[MqttEvent]
 
@@ -54,7 +56,7 @@ proc sendWorkerEvent(eventQueue: ThreadQueue[MqttEvent]; event: sink MqttEvent) 
   ##
   ## This is deliberately non-raising.  A closed/full event queue means the owner
   ## is already tearing down or misconfigured; there is no safe higher-level place
-  ## to report that from this low-level worker shell.
+  ## to report that from this low-level worker.
   if eventQueue.isNil or eventQueue.isClosed:
     return
 
@@ -65,23 +67,107 @@ proc sendWorkerError(eventQueue: ThreadQueue[MqttEvent]; error: MqttError;
                      commandId = 0) {.raises: [].} =
   sendWorkerEvent(eventQueue, errorEvent(error, commandId))
 
+proc flushLoop(client: LowLevelClient; eventQueue: ThreadQueue[MqttEvent];
+               connected: var bool; loopTimeoutMs: int; rounds: int) {.raises: [].} =
+  ## Run a few manual-loop iterations and report failures as worker errors.
+  if not connected:
+    return
+
+  for _ in 0 ..< rounds:
+    let loopRes = loopLowLevelClient(client, timeoutMs = loopTimeoutMs)
+    if loopRes.isErr:
+      connected = false
+      sendWorkerError(eventQueue, loopRes.error)
+      return
+
 proc handleCommand(command: sink MqttCommand; running: var bool;
-                   eventQueue: ThreadQueue[MqttEvent]) {.raises: [].} =
+                   connected: var bool; client: LowLevelClient;
+                   eventQueue: ThreadQueue[MqttEvent];
+                   loopTimeoutMs: int) {.raises: [].} =
   ## Handle one worker command.
   ##
-  ## Step 6 only proves the worker lifecycle.  MQTT network operations are added
-  ## in the next step, after command/event queue ownership is known to work.
+  ## libmosquitto calls are intentionally made only here, inside the worker
+  ## thread that owns LowLevelClient.
   var cmd = command
+
   case cmd.kind
   of mckStop:
+    if connected:
+      discard disconnectLowLevelClient(client)
+      flushLoop(client, eventQueue, connected, loopTimeoutMs, rounds = 2)
+      connected = false
     running = false
     sendWorkerEvent(eventQueue, stoppedEvent(commandId = cmd.id))
-  of mckConnect, mckDisconnect, mckPublish, mckSubscribe, mckUnsubscribe:
-    sendWorkerError(
-      eventQueue,
-      invalidState("MQTT worker", &"command is not implemented yet: {cmd.kind}"),
-      cmd.id
-    )
+
+  of mckConnect:
+    if connected:
+      sendWorkerError(
+        eventQueue,
+        invalidState("MQTT worker connect", "client is already connected"),
+        cmd.id
+      )
+      return
+
+    let connectRes = connectLowLevelClient(client, cmd.host, cmd.port, cmd.keepalive)
+    if connectRes.isErr:
+      sendWorkerError(eventQueue, connectRes.error, cmd.id)
+      return
+
+    connected = true
+    flushLoop(client, eventQueue, connected, loopTimeoutMs, rounds = 3)
+    if connected:
+      sendWorkerEvent(eventQueue, connectedEvent(commandId = cmd.id))
+
+  of mckDisconnect:
+    if not connected:
+      sendWorkerEvent(eventQueue, disconnectedEvent(commandId = cmd.id, detail = "already disconnected"))
+      return
+
+    let disconnectRes = disconnectLowLevelClient(client)
+    if disconnectRes.isErr:
+      sendWorkerError(eventQueue, disconnectRes.error, cmd.id)
+      connected = false
+      return
+
+    flushLoop(client, eventQueue, connected, loopTimeoutMs, rounds = 2)
+    connected = false
+    sendWorkerEvent(eventQueue, disconnectedEvent(commandId = cmd.id))
+
+  of mckPublish:
+    if not connected:
+      sendWorkerError(eventQueue, invalidState("MQTT worker publish", "client is not connected"), cmd.id)
+      return
+
+    let publishRes = publishLowLevelClient(client, cmd.topic, cmd.payload, cmd.qos, cmd.retain)
+    if publishRes.isErr:
+      sendWorkerError(eventQueue, publishRes.error, cmd.id)
+      return
+
+    sendWorkerEvent(eventQueue, publishedEvent(publishRes.get(), commandId = cmd.id))
+
+  of mckSubscribe:
+    if not connected:
+      sendWorkerError(eventQueue, invalidState("MQTT worker subscribe", "client is not connected"), cmd.id)
+      return
+
+    let subscribeRes = subscribeLowLevelClient(client, cmd.topic, cmd.qos)
+    if subscribeRes.isErr:
+      sendWorkerError(eventQueue, subscribeRes.error, cmd.id)
+      return
+
+    sendWorkerEvent(eventQueue, subscribedEvent(subscribeRes.get(), commandId = cmd.id))
+
+  of mckUnsubscribe:
+    if not connected:
+      sendWorkerError(eventQueue, invalidState("MQTT worker unsubscribe", "client is not connected"), cmd.id)
+      return
+
+    let unsubscribeRes = unsubscribeLowLevelClient(client, cmd.topic)
+    if unsubscribeRes.isErr:
+      sendWorkerError(eventQueue, unsubscribeRes.error, cmd.id)
+      return
+
+    sendWorkerEvent(eventQueue, unsubscribedEvent(unsubscribeRes.get(), commandId = cmd.id))
 
 proc workerMain(args: MqttWorkerArgs) {.thread.} =
   var stopCommandId = 0
@@ -100,7 +186,17 @@ proc workerMain(args: MqttWorkerArgs) {.thread.} =
     return
 
   let client = clientRes.get()
+  var connected = false
   var running = true
+
+  let sink: MessageSink = proc(message: MqttMessage) =
+    var msg = message
+    sendWorkerEvent(args.eventQueue, messageReceivedEvent(move msg))
+
+  let sinkRes = setMessageSink(client, sink)
+  if sinkRes.isErr:
+    sendWorkerError(args.eventQueue, sinkRes.error)
+    running = false
 
   while running:
     var command: MqttCommand
@@ -111,10 +207,26 @@ proc workerMain(args: MqttWorkerArgs) {.thread.} =
 
     if recvRes.get():
       stopCommandId = command.id
-      handleCommand(move command, running, args.eventQueue)
+      handleCommand(move command, running, connected, client, args.eventQueue, args.loopTimeoutMs)
     else:
-      sleep(args.idleSleepMs)
+      if connected:
+        let loopRes = loopLowLevelClient(client, timeoutMs = args.loopTimeoutMs)
+        if loopRes.isErr:
+          connected = false
+          sendWorkerError(args.eventQueue, loopRes.error)
+      else:
+        sleep(args.idleSleepMs)
 
+    let callbackError = lastCallbackError(client)
+    if callbackError.isSome():
+      sendWorkerError(args.eventQueue, callbackError.get())
+      discard clearCallbackError(client)
+
+  if connected:
+    discard disconnectLowLevelClient(client)
+    connected = false
+
+  discard clearMessageSink(client)
   discard closeLowLevelClient(client)
   discard cleanupLibrary()
 
@@ -123,7 +235,7 @@ proc workerMain(args: MqttWorkerArgs) {.thread.} =
 # ------------------------------------------------------------------------------
 proc startMqttWorker*(clientId = ""; cleanSession = true;
                       commandQueueLen = 32; eventQueueLen = 32;
-                      idleSleepMs = 1): MqttResult[MqttWorker] =
+                      idleSleepMs = 1; loopTimeoutMs = 10): MqttResult[MqttWorker] =
   ## Start a Nim-managed MQTT worker thread.
   ##
   ## The worker owns the LowLevelClient/libmosquitto handle.  Callers communicate
@@ -134,6 +246,8 @@ proc startMqttWorker*(clientId = ""; cleanSession = true;
     return err(invalidArgument("start MQTT worker", "eventQueueLen must be positive"))
   if idleSleepMs < 0:
     return err(invalidArgument("start MQTT worker", "idleSleepMs must not be negative"))
+  if loopTimeoutMs < 0:
+    return err(invalidArgument("start MQTT worker", "loopTimeoutMs must not be negative"))
 
   let commandQueueRes = newThreadQueue[MqttCommand](commandQueueLen)
   if commandQueueRes.isErr:
@@ -154,6 +268,7 @@ proc startMqttWorker*(clientId = ""; cleanSession = true;
     clientId: clientId,
     cleanSession: cleanSession,
     idleSleepMs: idleSleepMs,
+    loopTimeoutMs: loopTimeoutMs,
     commandQueue: worker.commandQueue,
     eventQueue: worker.eventQueue
   ))
