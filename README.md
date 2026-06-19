@@ -32,7 +32,7 @@ Currently implemented:
 - minimal nmqtt-compatible facade
 - username/password authentication plumbing
 - Will message plumbing
-- TLS certificate configuration plumbing
+- TLS configuration plumbing with OS trust store, explicit CA, mTLS client cert/key, and explicit insecure mode
 - MQTT protocol version selection
 - MQTT v5 CONNECT properties:
   - Session Expiry Interval
@@ -89,8 +89,11 @@ With the current dynlib approach, `libssl` / `libcrypto` are resolved through
 
 For public cloud brokers, the server certificate is normally signed by a public
 CA. Self-signed certificates are mainly needed for local/private broker tests.
-Some cloud brokers require client certificate authentication; use `mqttTls()` or
-the nmqtt-compatible `set_ssl_certificates()` path for client cert/key plumbing.
+Use `mqttTlsWithOsTrustStore()` / `set_tls_os_certs()` for public CA based
+brokers, `mqttTlsWithCa()` / `set_tls_ca()` for private CA roots, and
+`mqttTlsClientCertificate()` / `set_ssl_certificates()` for mTLS client
+certificate authentication. `insecure` / `set_tls_insecure()` is available only
+for explicit development or local broker testing.
 
 ## Quick example: nmqtt-compatible facade
 
@@ -178,6 +181,8 @@ Currently supported in the compatibility facade:
 - `set_host(host, port = 1883, sslOn = false)`
 - `set_ping_interval(seconds)`
 - `set_auth(username, password)`
+- `set_tls_os_certs()` / `set_tls_ca(cafile)` / `set_tls_capath(capath)`
+- `set_tls_insecure(insecure = true)`
 - `set_ssl_certificates(certfile, keyfile)`
 - `set_will(topic, message, qos = 0, retain = false)`
 - `setProtocolVersion(mpv311 | mpv5)`

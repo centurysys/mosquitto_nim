@@ -27,9 +27,15 @@ type
     ## Nim-owned TLS configuration for libmosquitto.
     ##
     ## The strings are kept in Nim-owned memory until the worker applies them to
-    ## libmosquitto before connecting.  Empty strings are passed as nil so the
+    ## libmosquitto before connecting. Empty strings are passed as nil so the
     ## caller can use only the pieces needed by its broker setup.
+    ##
+    ## useOsTrustStore enables libmosquitto's OS CA trust store option. This is
+    ## the practical default for cloud brokers with publicly trusted server
+    ## certificates, while cafile/capath remain available for private PKI and
+    ## local test brokers.
     enabled*: bool
+    useOsTrustStore*: bool
     cafile*: string
     capath*: string
     certfile*: string
@@ -225,18 +231,103 @@ proc bytesFromString*(payload: string): seq[byte] =
   copyMem(addr result[0], unsafeAddr payload[0], payload.len)
 
 proc noTls*(): MqttTlsConfig =
-  result = MqttTlsConfig(enabled: false)
+  result = MqttTlsConfig(enabled: false, useOsTrustStore: false)
 
 proc mqttTls*(cafile = ""; capath = ""; certfile = ""; keyfile = "";
-              insecure = false): MqttTlsConfig =
+              insecure = false; useOsTrustStore = true): MqttTlsConfig =
+  ## Build TLS configuration.
+  ##
+  ## By default this uses the operating system trust store, which is the usual
+  ## setup for public cloud brokers. Provide cafile/capath for private CA roots
+  ## or local self-signed test brokers. Provide certfile/keyfile for mTLS client
+  ## authentication. insecure disables hostname verification and should be kept
+  ## for explicit development/test use only.
   result = MqttTlsConfig(
     enabled: true,
+    useOsTrustStore: useOsTrustStore,
     cafile: cafile,
     capath: capath,
     certfile: certfile,
     keyfile: keyfile,
     insecure: insecure
   )
+
+proc mqttTlsWithOsTrustStore*(certfile = ""; keyfile = "";
+                              insecure = false): MqttTlsConfig =
+  ## Build TLS configuration using the operating system CA trust store.
+  result = mqttTls(
+    certfile = certfile,
+    keyfile = keyfile,
+    insecure = insecure,
+    useOsTrustStore = true
+  )
+
+proc mqttTlsWithCa*(cafile: string; certfile = ""; keyfile = "";
+                    insecure = false): MqttTlsConfig =
+  ## Build TLS configuration using a CA bundle file.
+  result = mqttTls(
+    cafile = cafile,
+    certfile = certfile,
+    keyfile = keyfile,
+    insecure = insecure,
+    useOsTrustStore = false
+  )
+
+proc mqttTlsWithCaPath*(capath: string; certfile = ""; keyfile = "";
+                        insecure = false): MqttTlsConfig =
+  ## Build TLS configuration using a CA certificate directory.
+  result = mqttTls(
+    capath = capath,
+    certfile = certfile,
+    keyfile = keyfile,
+    insecure = insecure,
+    useOsTrustStore = false
+  )
+
+proc mqttTlsClientCertificate*(certfile: string; keyfile: string; cafile = "";
+                               capath = ""; useOsTrustStore = true;
+                               insecure = false): MqttTlsConfig =
+  ## Build TLS configuration for mTLS client certificate authentication.
+  result = mqttTls(
+    cafile = cafile,
+    capath = capath,
+    certfile = certfile,
+    keyfile = keyfile,
+    insecure = insecure,
+    useOsTrustStore = useOsTrustStore
+  )
+
+proc hasClientCertificate*(config: MqttTlsConfig): bool {.inline.} =
+  result = config.certfile.len > 0 or config.keyfile.len > 0
+
+proc hasCustomCa*(config: MqttTlsConfig): bool {.inline.} =
+  result = config.cafile.len > 0 or config.capath.len > 0
+
+proc validateTlsConfig*(config: MqttTlsConfig; context = "MQTT TLS config"): MqttResult[MqttOk] =
+  ## Validate TLS configuration before it is applied to libmosquitto.
+  if not config.enabled:
+    return ok(MqttOk())
+
+  if config.cafile.len == 0 and config.capath.len == 0 and
+     not config.useOsTrustStore:
+    return err(invalidArgument(
+      context,
+      "TLS requires cafile, capath, or OS trust store"
+    ))
+
+  if config.certfile.len == 0 and config.keyfile.len > 0:
+    return err(invalidArgument(
+      context,
+      "TLS key file cannot be set without client certificate file"
+    ))
+
+  if config.certfile.len > 0 and config.keyfile.len == 0:
+    return err(invalidArgument(
+      context,
+      "TLS client certificate file cannot be set without key file"
+    ))
+
+  result = ok(MqttOk())
 
 proc noWill*(): MqttWill =
   result = MqttWill(enabled: false, qos: qos0)

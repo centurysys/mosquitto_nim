@@ -320,30 +320,47 @@ proc optionalCString(value: string): cstring =
   result = value.cstring
 
 proc setTls*(client: LowLevelClient; config: MqttTlsConfig): MqttResult[MqttOk] =
-  ## Configure certificate based TLS on the libmosquitto handle.
+  ## Configure TLS on the libmosquitto handle.
   ##
   ## This must be called before connectLowLevelClient(). Passing noTls() is a
   ## no-op so higher layers can unconditionally apply optional TLS settings.
   if not config.enabled:
     return ok(MqttOk())
 
+  let validateRes = validateTlsConfig(config, "set MQTT TLS")
+  if validateRes.isErr:
+    return err(validateRes.error)
+
   let rawRes = requireOpen(client, "set MQTT TLS")
   if rawRes.isErr:
     return err(rawRes.error)
 
-  let tlsRes = checkMosq(
-    mosquitto_tls_set(
-      rawRes.get(),
-      optionalCString(config.cafile),
-      optionalCString(config.capath),
-      optionalCString(config.certfile),
-      optionalCString(config.keyfile),
-      nil
-    ),
-    "mosquitto_tls_set"
-  )
-  if tlsRes.isErr:
-    return err(tlsRes.error)
+  if config.useOsTrustStore:
+    let osTrustRes = checkMosq(
+      mosquitto_int_option(
+        rawRes.get(),
+        MOSQ_OPT_TLS_USE_OS_CERTS,
+        1.cint
+      ),
+      "mosquitto_int_option(MOSQ_OPT_TLS_USE_OS_CERTS)"
+    )
+    if osTrustRes.isErr:
+      return err(osTrustRes.error)
+
+  if config.hasCustomCa() or config.hasClientCertificate():
+    let tlsRes = checkMosq(
+      mosquitto_tls_set(
+        rawRes.get(),
+        optionalCString(config.cafile),
+        optionalCString(config.capath),
+        optionalCString(config.certfile),
+        optionalCString(config.keyfile),
+        nil
+      ),
+      "mosquitto_tls_set"
+    )
+    if tlsRes.isErr:
+      return err(tlsRes.error)
 
   if config.insecure:
     let insecureRes = checkMosq(

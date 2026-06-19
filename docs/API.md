@@ -65,6 +65,38 @@ Supported protocol versions:
 
 The default is `mpv311`.
 
+### TLS configuration
+
+`MqttTlsConfig` separates the usual TLS cases:
+
+- `mqttTlsWithOsTrustStore()` for public CA based cloud brokers.
+- `mqttTlsWithCa(cafile)` and `mqttTlsWithCaPath(capath)` for private CA roots.
+- `mqttTlsClientCertificate(certfile, keyfile, ...)` for mTLS client certificate authentication.
+- `insecure = true` / `setTlsInsecure()` for explicit development or local broker testing.
+
+Validation rejects enabled TLS configs that have no CA source and no OS trust
+store, and also rejects partial client cert/key pairs.
+
+Highlevel clients can store TLS defaults for future connects:
+
+```nim
+discard client.setTlsWithOsTrustStore()
+discard client.setTlsClientCertificate("device.crt", "device.key")
+discard client.setTlsCa("private-ca.crt")
+discard client.setTlsInsecure(true)
+discard client.clearTls()
+```
+
+The nmqtt-compatible facade exposes equivalent helpers:
+
+```nim
+ctx.set_host("example.azure-devices.net", 8883, sslOn = true)
+discard ctx.set_tls_os_certs()
+discard ctx.set_tls_ca("private-ca.crt")
+ctx.set_ssl_certificates("device.crt", "device.key")
+discard ctx.set_tls_insecure(true)
+```
+
 ### MQTT v5 properties
 
 Currently supported for CONNECT:
@@ -254,6 +286,7 @@ let ctx = newMqttCtx("client-id")
 ctx.set_host("127.0.0.1", 1883)
 ctx.set_ping_interval(30)
 ctx.set_auth("user", "pass")
+discard ctx.set_tls_os_certs()
 ctx.set_ssl_certificates("client.crt", "client.key")
 ctx.set_will("client/status", "offline", qos = 1, retain = true)
 ctx.setProtocolVersion(mpv5)

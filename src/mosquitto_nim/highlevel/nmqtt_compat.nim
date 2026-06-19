@@ -42,10 +42,9 @@ type
     connectProperties: MqttConnectProperties
     cleanSession: bool
     sslOn: bool
+    tlsConfig: MqttTlsConfig
     username: string
     password: string
-    sslCert: string
-    sslKey: string
     willTopic: string
     willMessage: string
     willQos: int
@@ -104,12 +103,9 @@ proc qosFromInt(ctx: MqttCtx; qos: int; context: string): MqttQos =
 
 proc ensureSupportedConfig(ctx: MqttCtx) =
   ## Keep unsupported nmqtt settings explicit instead of silently ignoring them.
-  ## TLS certificate configuration is wired through lowlevel/worker now.
-  if ctx.sslKey.len > 0 and ctx.sslCert.len == 0:
-    ctx.raiseCompat(invalidArgument(
-      "start nmqtt-compatible client",
-      "SSL key cannot be set without SSL certificate"
-    ))
+  let tlsRes = validateTlsConfig(ctx.tlsConfig, "start nmqtt-compatible client TLS")
+  if tlsRes.isErr:
+    ctx.raiseCompat(tlsRes.error)
 
 proc ensureClient(ctx: MqttCtx) =
   ctx.requireCtx("ensure nmqtt-compatible client")
@@ -291,16 +287,68 @@ proc set_host*(ctx: MqttCtx; host: string; port: int = 1883; sslOn = false) =
   ctx.host = host
   ctx.port = port
   ctx.sslOn = sslOn
+  if sslOn and not ctx.tlsConfig.enabled:
+    ctx.tlsConfig = mqttTlsWithOsTrustStore()
 
 proc set_auth*(ctx: MqttCtx; username: string; password: string) =
   ctx.requireCtx("set MQTT auth")
   ctx.username = username
   ctx.password = password
 
+proc tlsConfig*(ctx: MqttCtx): MqttTlsConfig =
+  ## Return the TLS configuration used by future compatibility connects.
+  if ctx.isNil:
+    return noTls()
+  result = ctx.tlsConfig
+
+proc setTls*(ctx: MqttCtx; config: MqttTlsConfig): MqttResult[MqttOk] =
+  ## Store TLS configuration for future compatibility connects.
+  if ctx.isNil:
+    return err(invalidState("set nmqtt TLS config", "context is nil"))
+
+  let validateRes = validateTlsConfig(config, "set nmqtt TLS config")
+  if validateRes.isErr:
+    ctx.setLastError(validateRes.error)
+    return err(validateRes.error)
+
+  ctx.tlsConfig = config
+  ctx.sslOn = config.enabled
+  result = ok(MqttOk())
+
+proc clearTls*(ctx: MqttCtx): MqttResult[MqttOk] =
+  result = ctx.setTls(noTls())
+
+proc set_tls_ca*(ctx: MqttCtx; cafile: string): MqttResult[MqttOk] =
+  ## Configure TLS with an explicit CA bundle file.
+  result = ctx.setTls(mqttTlsWithCa(cafile))
+
+proc set_tls_capath*(ctx: MqttCtx; capath: string): MqttResult[MqttOk] =
+  ## Configure TLS with an explicit CA certificate directory.
+  result = ctx.setTls(mqttTlsWithCaPath(capath))
+
+proc set_tls_os_certs*(ctx: MqttCtx): MqttResult[MqttOk] =
+  ## Configure TLS using the operating system CA trust store.
+  result = ctx.setTls(mqttTlsWithOsTrustStore())
+
+proc set_tls_insecure*(ctx: MqttCtx; insecure = true): MqttResult[MqttOk] =
+  ## Explicitly enable/disable TLS hostname verification bypass.
+  var config = if ctx.isNil: noTls() else: ctx.tlsConfig
+  if not config.enabled:
+    config = mqttTlsWithOsTrustStore()
+  config.insecure = insecure
+  result = ctx.setTls(config)
+
 proc set_ssl_certificates*(ctx: MqttCtx; sslCert: string; sslKey: string) =
+  ## nmqtt-compatible mTLS client certificate/key setter.
   ctx.requireCtx("set MQTT SSL certificates")
-  ctx.sslCert = sslCert
-  ctx.sslKey = sslKey
+  var config = ctx.tlsConfig
+  if not config.enabled:
+    config = mqttTlsWithOsTrustStore()
+  config.certfile = sslCert
+  config.keyfile = sslKey
+  let tlsRes = ctx.setTls(config)
+  if tlsRes.isErr:
+    ctx.raiseCompat(tlsRes.error)
 
 proc set_will*(ctx: MqttCtx; topic, msg: string; qos = 0; retain = false) =
   ctx.requireCtx("set MQTT will")
@@ -420,9 +468,9 @@ proc connect*(ctx: MqttCtx) {.async.} =
     return
 
   ctx.ensureClient()
-  var tls = noTls()
-  if ctx.sslOn or ctx.sslCert.len > 0 or ctx.sslKey.len > 0:
-    tls = mqttTls(certfile = ctx.sslCert, keyfile = ctx.sslKey)
+  var tls = ctx.tlsConfig
+  if not tls.enabled and ctx.sslOn:
+    tls = mqttTlsWithOsTrustStore()
 
   var will = noWill()
   if ctx.willTopic.len > 0:

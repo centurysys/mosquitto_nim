@@ -129,11 +129,28 @@ suite "mosquitto_nim lowlevel smoke test":
     check cleanupLibrary().isOk
 
 
-  test "TLS config can be represented and applied as a no-op when disabled":
+  test "TLS config can be represented, validated, and applied as a no-op when disabled":
     let tls = mqttTls(certfile = "client.crt", keyfile = "client.key")
     check tls.enabled
+    check tls.useOsTrustStore
     check tls.certfile == "client.crt"
     check tls.keyfile == "client.key"
+    check validateTlsConfig(tls, "test TLS config").isOk
+
+    let caTls = mqttTlsWithCa("ca.crt")
+    check caTls.enabled
+    check not caTls.useOsTrustStore
+    check caTls.cafile == "ca.crt"
+    check validateTlsConfig(caTls, "test CA TLS config").isOk
+
+    let osTls = mqttTlsWithOsTrustStore()
+    check osTls.enabled
+    check osTls.useOsTrustStore
+    check validateTlsConfig(osTls, "test OS TLS config").isOk
+
+    check validateTlsConfig(mqttTls(useOsTrustStore = false), "test invalid TLS").isErr
+    check validateTlsConfig(mqttTls(certfile = "client.crt", keyfile = ""), "test invalid TLS").isErr
+    check validateTlsConfig(mqttTls(certfile = "", keyfile = "client.key"), "test invalid TLS").isErr
 
     check initLibrary().isOk
 
@@ -141,7 +158,7 @@ suite "mosquitto_nim lowlevel smoke test":
     check clientRes.isOk
     let client = clientRes.get()
 
-    # noTls() is intentionally a no-op.  This keeps optional TLS settings easy to
+    # noTls() is intentionally a no-op. This keeps optional TLS settings easy to
     # apply from worker/highlevel code without special-casing disabled TLS.
     check setTls(client, noTls()).isOk
 
@@ -985,6 +1002,102 @@ suite "mosquitto_nim MQTT v5 connect properties API":
 
     check ctx.clearConnectProperties().isOk
     check not ctx.connectProperties().hasProperties()
+
+
+suite "mosquitto_nim TLS configuration API":
+  test "highlevel client stores TLS config for future connect commands":
+    let clientRes = startMqttClient("mosquitto_nim_step31_tls_highlevel", pollMs = 1)
+    check clientRes.isOk
+
+    if clientRes.isOk:
+      let client = clientRes.get()
+      check not client.tlsConfig().enabled
+
+      check client.setTlsWithOsTrustStore().isOk
+      check client.tlsConfig().enabled
+      check client.tlsConfig().useOsTrustStore
+
+      check client.setTlsClientCertificate("device.crt", "device.key").isOk
+      check client.tlsConfig().certfile == "device.crt"
+      check client.tlsConfig().keyfile == "device.key"
+      check client.tlsConfig().useOsTrustStore
+
+      check client.setTlsCa("ca.crt").isOk
+      check client.tlsConfig().enabled
+      check client.tlsConfig().cafile == "ca.crt"
+      check not client.tlsConfig().useOsTrustStore
+
+      check client.setTls(MqttTlsConfig(
+        enabled: true,
+        useOsTrustStore: false,
+        cafile: "",
+        capath: "",
+        certfile: "",
+        keyfile: "",
+        insecure: false
+      )).isErr
+      check client.tlsConfig().cafile == "ca.crt"
+
+      check client.clearTls().isOk
+      check not client.tlsConfig().enabled
+
+      let stopRes = client.requestStop()
+      check stopRes.isOk
+      if stopRes.isOk:
+        var sawStopped = false
+        for _ in 0 ..< 100:
+          let drainRes = client.drainEvents()
+          check drainRes.isOk
+          if drainRes.isOk:
+            for event in drainRes.get():
+              if event.kind == mevStopped and event.commandId == stopRes.get():
+                sawStopped = true
+                break
+          if sawStopped:
+            break
+          sleep(10)
+        check sawStopped
+
+      check client.joinMqttClient().isOk
+
+  test "nmqtt compatibility context stores TLS config helpers":
+    let ctx = newMqttCtx("mosquitto_nim_step31_tls_nmqtt")
+    check not ctx.tlsConfig().enabled
+
+    ctx.set_host("example.azure-devices.net", 8883, sslOn = true)
+    check ctx.tlsConfig().enabled
+    check ctx.tlsConfig().useOsTrustStore
+
+    check ctx.set_tls_ca("ca.crt").isOk
+    check ctx.tlsConfig().cafile == "ca.crt"
+    check not ctx.tlsConfig().useOsTrustStore
+
+    ctx.set_ssl_certificates("device.crt", "device.key")
+    check ctx.tlsConfig().certfile == "device.crt"
+    check ctx.tlsConfig().keyfile == "device.key"
+
+    check ctx.set_tls_os_certs().isOk
+    check ctx.tlsConfig().useOsTrustStore
+    check ctx.tlsConfig().cafile.len == 0
+
+    check ctx.set_tls_insecure(true).isOk
+    check ctx.tlsConfig().insecure
+
+    let invalidRes = ctx.setTls(MqttTlsConfig(
+      enabled: true,
+      useOsTrustStore: false,
+      cafile: "",
+      capath: "",
+      certfile: "",
+      keyfile: "",
+      insecure: false
+    ))
+    check invalidRes.isErr
+    check ctx.lastError().isSome
+    check ctx.tlsConfig().insecure
+
+    check ctx.clearTls().isOk
+    check not ctx.tlsConfig().enabled
 
 
 when getEnv("MOSQUITTO_NIM_TEST_BROKER") == "1":

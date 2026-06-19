@@ -46,6 +46,7 @@ type
     queue: MqttQueueSnapshot
     lastConnectReasonCode: int
     lastConnectProperties: MqttProperties
+    tlsConfig: MqttTlsConfig
     connectProperties: MqttConnectProperties
     reconnectPolicy: MqttReconnectPolicy
     offlineQueuePolicy: MqttOfflineQueuePolicy
@@ -177,6 +178,7 @@ proc startMqttClient*(clientId = ""; cleanSession = true;
   client.queue = emptyQueueSnapshot()
   client.lastConnectReasonCode = 0
   client.lastConnectProperties = @[]
+  client.tlsConfig = noTls()
   client.connectProperties = noConnectProperties()
   client.reconnectPolicy = noReconnect()
   client.offlineQueuePolicy = noOfflineQueue()
@@ -242,6 +244,65 @@ proc lastConnectProperties*(client: MqttClient): MqttProperties {.inline.} =
   if client.isNil:
     return @[]
   result = client.lastConnectProperties
+
+proc tlsConfig*(client: MqttClient): MqttTlsConfig {.inline.} =
+  ## Return the TLS configuration attached to future connect commands.
+  if client.isNil:
+    return noTls()
+  result = client.tlsConfig
+
+proc setTls*(client: MqttClient; config: MqttTlsConfig): MqttResult[MqttOk] =
+  ## Store TLS configuration for future connect commands.
+  ##
+  ## Passing noTls() disables stored TLS settings. If connect(..., tls = ...) is
+  ## given an enabled config, that per-call config still takes precedence.
+  let openRes = client.ensureOpen("set MQTT TLS config")
+  if openRes.isErr:
+    return err(openRes.error)
+
+  let validateRes = validateTlsConfig(config, "set MQTT TLS config")
+  if validateRes.isErr:
+    return err(validateRes.error)
+
+  client.tlsConfig = config
+  result = ok(MqttOk())
+
+proc clearTls*(client: MqttClient): MqttResult[MqttOk] =
+  ## Clear stored TLS configuration for future connect commands.
+  result = client.setTls(noTls())
+
+proc setTlsCa*(client: MqttClient; cafile: string): MqttResult[MqttOk] =
+  ## Store TLS configuration using an explicit CA bundle file.
+  result = client.setTls(mqttTlsWithCa(cafile))
+
+proc setTlsCaPath*(client: MqttClient; capath: string): MqttResult[MqttOk] =
+  ## Store TLS configuration using an explicit CA certificate directory.
+  result = client.setTls(mqttTlsWithCaPath(capath))
+
+proc setTlsWithOsTrustStore*(client: MqttClient): MqttResult[MqttOk] =
+  ## Store TLS configuration using the operating system CA trust store.
+  result = client.setTls(mqttTlsWithOsTrustStore())
+
+proc setTlsClientCertificate*(client: MqttClient; certfile: string;
+                              keyfile: string): MqttResult[MqttOk] =
+  ## Add or replace the mTLS client certificate/key in stored TLS config.
+  var config = if client.isNil: noTls() else: client.tlsConfig
+  if not config.enabled:
+    config = mqttTlsWithOsTrustStore()
+  config.certfile = certfile
+  config.keyfile = keyfile
+  result = client.setTls(config)
+
+proc setTlsInsecure*(client: MqttClient; insecure = true): MqttResult[MqttOk] =
+  ## Explicitly enable/disable TLS hostname verification bypass.
+  ##
+  ## This should be kept for development and local test brokers. It still
+  ## requires a CA source such as OS trust store, cafile, or capath.
+  var config = if client.isNil: noTls() else: client.tlsConfig
+  if not config.enabled:
+    config = mqttTlsWithOsTrustStore()
+  config.insecure = insecure
+  result = client.setTls(config)
 
 proc connectProperties*(client: MqttClient): MqttConnectProperties {.inline.} =
   ## Return the MQTT v5 CONNECT properties attached to future connect commands.
@@ -454,8 +515,14 @@ proc connect*(client: MqttClient; host: string; port = 1883;
               connectProperties: MqttConnectProperties = MqttConnectProperties()): MqttResult[int] =
   let policy = if client.isNil: noReconnect() else: client.reconnectPolicy
   let offlinePolicy = if client.isNil: noOfflineQueue() else: client.offlineQueuePolicy
+  let storedTls = if client.isNil: noTls() else: client.tlsConfig
+  let connectTls = if tls.enabled: tls else: storedTls
   let storedConnectProperties = if client.isNil: noConnectProperties() else: client.connectProperties
   let connectProps = if connectProperties.hasProperties(): connectProperties else: storedConnectProperties
+
+  let validateTlsRes = validateTlsConfig(connectTls, "connect MQTT client TLS")
+  if validateTlsRes.isErr:
+    return err(validateTlsRes.error)
 
   if protocolVersion != mpv5 and connectProps.hasProperties():
     return err(invalidArgument("connect MQTT client", "CONNECT properties require MQTT 5"))
@@ -472,7 +539,7 @@ proc connect*(client: MqttClient; host: string; port = 1883;
     connectProperties = connectProps,
     username = username,
     password = password,
-    tls = tls,
+    tls = connectTls,
     will = will,
     reconnectPolicy = policy,
     offlineQueuePolicy = offlinePolicy
