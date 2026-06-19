@@ -1,5 +1,7 @@
 # Destination: src/mosquitto_nim/lowlevel/bridge.nim
 
+import std/options
+
 import results
 
 import ./bindings/c_api
@@ -38,8 +40,16 @@ const
     ## MQTT v5 Response Topic identifier (0x08).
   MqttPropCorrelationDataId* = 9
     ## MQTT v5 Correlation Data identifier (0x09).
+  MqttPropSessionExpiryIntervalId* = 17
+    ## MQTT v5 Session Expiry Interval identifier (0x11).
+  MqttPropRequestProblemInformationId* = 23
+    ## MQTT v5 Request Problem Information identifier (0x17).
+  MqttPropReceiveMaximumId* = 33
+    ## MQTT v5 Receive Maximum identifier (0x21).
   MqttPropUserPropertyId* = 38
     ## MQTT v5 User Property identifier (0x26).
+  MqttPropMaximumPacketSizeId* = 39
+    ## MQTT v5 Maximum Packet Size identifier (0x27).
 
 proc copyUserProperties(properties: ptr mosquitto_property;
                         copied: var MqttProperties): MqttResult[MqttOk] =
@@ -364,6 +374,77 @@ proc buildMosquittoProperties*(properties: MqttProperties;
 proc freeMosquittoProperties*(properties: var ptr mosquitto_property) =
   ## Free a libmosquitto property list returned by buildMosquittoProperties().
   mosquitto_property_free_all(addr properties)
+
+proc buildMosquittoConnectProperties*(properties: MqttConnectProperties;
+                                      context = "MQTT v5 CONNECT properties"): MqttResult[ptr mosquitto_property] =
+  ## Convert typed MQTT v5 CONNECT properties to a libmosquitto property list.
+  ##
+  ## The caller owns the returned property list and must free it with
+  ## freeMosquittoProperties(), even when the subsequent libmosquitto call fails.
+  let validateRes = validateConnectProperties(properties, context)
+  if validateRes.isErr:
+    return err(validateRes.error)
+
+  var raw: ptr mosquitto_property = nil
+
+  if properties.sessionExpiryInterval.isSome:
+    let rc = mosquitto_property_add_int32(
+      addr raw,
+      MqttPropSessionExpiryIntervalId.cint,
+      properties.sessionExpiryInterval.get()
+    )
+    let addRes = checkMosq(rc, "mosquitto_property_add_int32(Session Expiry Interval)")
+    if addRes.isErr:
+      mosquitto_property_free_all(addr raw)
+      return err(addRes.error)
+
+  if properties.receiveMaximum.isSome:
+    let rc = mosquitto_property_add_int16(
+      addr raw,
+      MqttPropReceiveMaximumId.cint,
+      properties.receiveMaximum.get()
+    )
+    let addRes = checkMosq(rc, "mosquitto_property_add_int16(Receive Maximum)")
+    if addRes.isErr:
+      mosquitto_property_free_all(addr raw)
+      return err(addRes.error)
+
+  if properties.maximumPacketSize.isSome:
+    let rc = mosquitto_property_add_int32(
+      addr raw,
+      MqttPropMaximumPacketSizeId.cint,
+      properties.maximumPacketSize.get()
+    )
+    let addRes = checkMosq(rc, "mosquitto_property_add_int32(Maximum Packet Size)")
+    if addRes.isErr:
+      mosquitto_property_free_all(addr raw)
+      return err(addRes.error)
+
+  if properties.requestProblemInformation.isSome:
+    let value = if properties.requestProblemInformation.get(): 1'u8 else: 0'u8
+    let rc = mosquitto_property_add_byte(
+      addr raw,
+      MqttPropRequestProblemInformationId.cint,
+      value
+    )
+    let addRes = checkMosq(rc, "mosquitto_property_add_byte(Request Problem Information)")
+    if addRes.isErr:
+      mosquitto_property_free_all(addr raw)
+      return err(addRes.error)
+
+  for item in properties.userProperties:
+    let rc = mosquitto_property_add_string_pair(
+      addr raw,
+      MqttPropUserPropertyId.cint,
+      item[0].cstring,
+      item[1].cstring
+    )
+    let addRes = checkMosq(rc, "mosquitto_property_add_string_pair(CONNECT User Property)")
+    if addRes.isErr:
+      mosquitto_property_free_all(addr raw)
+      return err(addRes.error)
+
+  result = ok(raw)
 
 proc copyMessage*(message: ptr struct_mosquitto_message;
                   properties: ptr mosquitto_property = nil): MqttResult[MqttMessage] =

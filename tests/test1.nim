@@ -773,6 +773,188 @@ suite "mosquitto_nim highlevel client dispatcher integration":
 
     check waitFor scenario()
 
+suite "mosquitto_nim MQTT v5 connect properties API":
+  test "typed MQTT v5 connect properties validate and build into libmosquitto properties":
+    var props = mqttConnectProperties(
+      sessionExpiryInterval = some(3600'u32),
+      receiveMaximum = some(16'u16),
+      maximumPacketSize = some(65536'u32),
+      requestProblemInformation = some(true)
+    )
+    props.addUserProperty("client", "mosquitto_nim")
+
+    check props.hasProperties()
+    check props.validateConnectProperties().isOk
+    check props.sessionExpiryInterval.get() == 3600'u32
+    check props.receiveMaximum.get() == 16'u16
+    check props.maximumPacketSize.get() == 65536'u32
+    check props.requestProblemInformation.get()
+    check props.userProperties.len == 1
+
+    let rawRes = buildMosquittoConnectProperties(props)
+    check rawRes.isOk
+    if rawRes.isOk:
+      var raw = rawRes.get()
+      check raw != nil
+
+      var sessionExpiry: uint32 = 0
+      check mosquitto_property_read_int32(
+        raw,
+        MqttPropSessionExpiryIntervalId.cint,
+        addr sessionExpiry,
+        false
+      ) != nil
+      check sessionExpiry == 3600'u32
+
+      var receiveMaximum: uint16 = 0
+      check mosquitto_property_read_int16(
+        raw,
+        MqttPropReceiveMaximumId.cint,
+        addr receiveMaximum,
+        false
+      ) != nil
+      check receiveMaximum == 16'u16
+
+      var maximumPacketSize: uint32 = 0
+      check mosquitto_property_read_int32(
+        raw,
+        MqttPropMaximumPacketSizeId.cint,
+        addr maximumPacketSize,
+        false
+      ) != nil
+      check maximumPacketSize == 65536'u32
+
+      var requestProblemInformation: uint8 = 0
+      check mosquitto_property_read_byte(
+        raw,
+        MqttPropRequestProblemInformationId.cint,
+        addr requestProblemInformation,
+        false
+      ) != nil
+      check requestProblemInformation == 1'u8
+
+      var name: cstring = nil
+      var value: cstring = nil
+      check mosquitto_property_read_string_pair(
+        raw,
+        MqttPropUserPropertyId.cint,
+        addr name,
+        addr value,
+        false
+      ) != nil
+      check $name == "client"
+      check $value == "mosquitto_nim"
+
+      freeMosquittoProperties(raw)
+
+  test "typed MQTT v5 connect properties reject invalid limits":
+    var invalidReceive = noConnectProperties()
+    invalidReceive.setReceiveMaximum(0'u16)
+    check invalidReceive.validateConnectProperties().isErr
+    check buildMosquittoConnectProperties(invalidReceive).isErr
+
+    var invalidPacketSize = noConnectProperties()
+    invalidPacketSize.setMaximumPacketSize(0'u32)
+    check invalidPacketSize.validateConnectProperties().isErr
+    check buildMosquittoConnectProperties(invalidPacketSize).isErr
+
+    var invalidUserProperty = noConnectProperties()
+    invalidUserProperty.addUserProperty("", "bad")
+    check invalidUserProperty.validateConnectProperties().isErr
+    check buildMosquittoConnectProperties(invalidUserProperty).isErr
+
+  test "worker connect command carries typed MQTT v5 connect properties":
+    var props = noConnectProperties()
+    props.setSessionExpiryInterval(120'u32)
+    props.setReceiveMaximum(8'u16)
+    props.setRequestProblemInformation(false)
+
+    let cmd = connectCommand(
+      "127.0.0.1",
+      protocolVersion = mpv5,
+      connectProperties = props,
+      id = 2301
+    )
+    check cmd.kind == mckConnect
+    check cmd.protocolVersion == mpv5
+    check cmd.connectProperties.sessionExpiryInterval.get() == 120'u32
+    check cmd.connectProperties.receiveMaximum.get() == 8'u16
+    check cmd.connectProperties.requestProblemInformation.get() == false
+    check cmd.summary().contains("connectProperties=true")
+
+  test "highlevel client stores typed MQTT v5 connect properties":
+    let clientRes = startMqttClient("mosquitto_nim_step30_connect_props", pollMs = 1)
+    check clientRes.isOk
+
+    if clientRes.isOk:
+      let client = clientRes.get()
+      check not client.connectProperties().hasProperties()
+
+      var props = noConnectProperties()
+      props.setSessionExpiryInterval(600'u32)
+      props.setReceiveMaximum(12'u16)
+      props.setMaximumPacketSize(32768'u32)
+      props.addUserProperty("role", "test")
+      check client.setConnectProperties(props).isOk
+      check client.connectProperties().hasProperties()
+      check client.connectProperties().sessionExpiryInterval.get() == 600'u32
+      check client.connectProperties().receiveMaximum.get() == 12'u16
+      check client.connectProperties().maximumPacketSize.get() == 32768'u32
+      check client.connectProperties().userProperties.len == 1
+
+      var invalid = noConnectProperties()
+      invalid.setReceiveMaximum(0'u16)
+      check client.setConnectProperties(invalid).isErr
+      check client.connectProperties().receiveMaximum.get() == 12'u16
+
+      check client.clearConnectProperties().isOk
+      check not client.connectProperties().hasProperties()
+
+      let stopRes = client.requestStop()
+      check stopRes.isOk
+      if stopRes.isOk:
+        var sawStopped = false
+        for _ in 0 ..< 100:
+          let drainRes = client.drainEvents()
+          check drainRes.isOk
+          if drainRes.isOk:
+            for event in drainRes.get():
+              if event.kind == mevStopped and event.commandId == stopRes.get():
+                sawStopped = true
+                break
+          if sawStopped:
+            break
+          sleep(10)
+        check sawStopped
+
+      check client.joinMqttClient().isOk
+
+  test "nmqtt compatibility context stores typed MQTT v5 connect properties":
+    let ctx = newMqttCtx("mosquitto_nim_step30_connect_props_nmqtt")
+    check not ctx.connectProperties().hasProperties()
+
+    var props = mqttConnectProperties(
+      sessionExpiryInterval = some(1800'u32),
+      requestProblemInformation = some(false)
+    )
+    props.addUserProperty("compat", "true")
+
+    check ctx.setConnectProperties(props).isOk
+    check ctx.connectProperties().hasProperties()
+    check ctx.connectProperties().sessionExpiryInterval.get() == 1800'u32
+    check ctx.connectProperties().requestProblemInformation.get() == false
+    check ctx.connectProperties().userProperties.len == 1
+
+    var invalid = noConnectProperties()
+    invalid.setMaximumPacketSize(0'u32)
+    check ctx.setConnectProperties(invalid).isErr
+    check ctx.lastError().isSome
+    check ctx.connectProperties().sessionExpiryInterval.get() == 1800'u32
+
+    check ctx.clearConnectProperties().isOk
+    check not ctx.connectProperties().hasProperties()
+
+
 when getEnv("MOSQUITTO_NIM_TEST_BROKER") == "1":
   suite "mosquitto_nim lowlevel broker smoke test":
     test "manual loop can connect, subscribe, publish, and disconnect":

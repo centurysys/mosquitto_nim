@@ -31,14 +31,19 @@
 - Will message の設定伝搬
 - TLS 証明書設定の伝搬
 - MQTT protocol version 選択
-- MQTT v5 publish properties:
+- MQTT v5 CONNECT properties:
+  - Session Expiry Interval
+  - Receive Maximum
+  - Maximum Packet Size
+  - Request Problem Information
+  - User Property
+- MQTT v5 PUBLISH properties:
   - User Property
   - Response Topic
   - Correlation Data
   - Message Expiry Interval
   - Content Type
   - Payload Format Indicator
-- MQTT v5 publish property の型付きコンテナ (`MqttPublishProperties`)
 
 ## 必要なもの
 
@@ -105,24 +110,26 @@ proc main() {.async.} =
   ctx.set_host("127.0.0.1", 1883)
   ctx.setProtocolVersion(mpv5)
 
+  var connectProps = noConnectProperties()
+  connectProps.setSessionExpiryInterval(3600'u32)
+  connectProps.setReceiveMaximum(16'u16)
+  connectProps.setRequestProblemInformation(true)
+  discard ctx.setConnectProperties(connectProps)
+
   await ctx.start()
 
   await ctx.subscribe("demo/v5", 0) do (topic, message: string):
     echo topic, ": ", message
 
-  var props = noPublishProperties()
-  props.addUserProperty("trace-id", "abc123")
-  props.setResponseTopic("demo/response")
-  props.setCorrelationData(@[1'u8, 2, 3, 4])
-  props.setMessageExpiryInterval(60'u32)
-  props.setContentType("text/plain")
-  props.setPayloadFormatIndicator(mpfiUtf8)
-
   await ctx.publishV5(
     topic = "demo/v5",
-    message = "hello with typed properties",
+    message = "hello with properties",
     qos = 0,
-    properties = props,
+    properties = @[
+      userProperty("trace-id", "abc123"),
+      responseTopic("demo/response"),
+      correlationData(@[1'u8, 2, 3, 4]),
+    ],
   )
 
   await sleepAsync(500)

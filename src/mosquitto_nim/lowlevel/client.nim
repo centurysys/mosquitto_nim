@@ -454,6 +454,42 @@ proc connectLowLevelClient*(client: LowLevelClient; host: string;
     "mosquitto_connect"
   )
 
+proc connectLowLevelClientV5*(client: LowLevelClient; host: string;
+                              port = 1883; keepalive = 60;
+                              properties: MqttConnectProperties = MqttConnectProperties()): MqttResult[MqttOk] =
+  ## Start a blocking MQTT v5 libmosquitto connection attempt with CONNECT properties.
+  ##
+  ## The caller must drive `loopLowLevelClient()` afterwards to process CONNACK,
+  ## keepalive, callbacks, and queued packets.  Passing an empty property set is
+  ## valid and still uses the MQTT v5 connect entry point.
+  let rawRes = requireOpen(client, "mosquitto_connect_bind_v5")
+  if rawRes.isErr:
+    return err(rawRes.error)
+
+  if host.len == 0:
+    return err(invalidArgument("mosquitto_connect_bind_v5", "host must not be empty"))
+  if port < 1 or port > 65535:
+    return err(invalidArgument("mosquitto_connect_bind_v5", "port must be in range 1..65535"))
+  if keepalive < 0:
+    return err(invalidArgument("mosquitto_connect_bind_v5", "keepalive must not be negative"))
+
+  let propsRes = buildMosquittoConnectProperties(properties, "connect MQTT v5 properties")
+  if propsRes.isErr:
+    return err(propsRes.error)
+
+  var rawProps = propsRes.get()
+  let rc = mosquitto_connect_bind_v5(
+    rawRes.get(),
+    host.cstring,
+    port.cint,
+    keepalive.cint,
+    nil,
+    rawProps
+  )
+  freeMosquittoProperties(rawProps)
+
+  result = checkMosq(rc, "mosquitto_connect_bind_v5")
+
 proc disconnectLowLevelClient*(client: LowLevelClient): MqttResult[MqttOk] =
   ## Queue a clean disconnect packet.
   ##

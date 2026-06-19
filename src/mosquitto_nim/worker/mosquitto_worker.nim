@@ -213,6 +213,19 @@ proc applyConnectConfig(client: LowLevelClient; cmd: MqttCommand): MqttResult[Mq
 
   result = ok(MqttOk())
 
+proc startConnectUsingCommand(client: LowLevelClient; cmd: MqttCommand): MqttResult[MqttOk] =
+  ## Start a connect attempt using the protocol/properties carried by the command.
+  if cmd.protocolVersion == mpv5:
+    return connectLowLevelClientV5(
+      client,
+      cmd.host,
+      cmd.port,
+      cmd.keepalive,
+      cmd.connectProperties
+    )
+
+  result = connectLowLevelClient(client, cmd.host, cmd.port, cmd.keepalive)
+
 proc publishCommandBytes(cmd: MqttCommand): int {.raises: [].} =
   ## Approximate the memory retained by an offline publish command.
   ##
@@ -390,7 +403,8 @@ proc startStoredReconnect(reconnect: var WorkerReconnectState;
   )
   sendWorkerState(eventQueue, mcsReconnecting, commandId = cmd.id, detail = "automatic reconnect attempt")
 
-  let connectRes = if reconnect.reconnectApiAvailable:
+  let mustUseStoredConnect = cmd.protocolVersion == mpv5 and cmd.connectProperties.hasProperties()
+  let connectRes = if reconnect.reconnectApiAvailable and not mustUseStoredConnect:
       reconnectLowLevelClient(client)
     else:
       let configRes = applyConnectConfig(client, cmd)
@@ -399,7 +413,7 @@ proc startStoredReconnect(reconnect: var WorkerReconnectState;
         sendWorkerError(eventQueue, configRes.error, cmd.id)
         discard scheduleReconnect(reconnect, eventQueue, detail = "reconnect config failed")
         return
-      connectLowLevelClient(client, cmd.host, cmd.port, cmd.keepalive)
+      startConnectUsingCommand(client, cmd)
 
   if connectRes.isErr:
     pendingConnectId = 0
@@ -479,6 +493,21 @@ proc handleCommand(command: sink MqttCommand; running: var bool;
       sendWorkerError(eventQueue, offlineQueueRes.error, cmd.id)
       return
 
+    if cmd.protocolVersion != mpv5 and cmd.connectProperties.hasProperties():
+      pendingConnectId = 0
+      sendWorkerError(
+        eventQueue,
+        invalidArgument("MQTT worker connect", "CONNECT properties require MQTT 5"),
+        cmd.id
+      )
+      return
+
+    let connectPropsRes = validateConnectProperties(cmd.connectProperties, "MQTT worker connect properties")
+    if connectPropsRes.isErr:
+      pendingConnectId = 0
+      sendWorkerError(eventQueue, connectPropsRes.error, cmd.id)
+      return
+
     reconnect.policy = cmd.reconnectPolicy
     reconnect.offlineQueuePolicy = cmd.offlineQueuePolicy
     reconnect.lastConnectCommand = some(cmd)
@@ -494,7 +523,7 @@ proc handleCommand(command: sink MqttCommand; running: var bool;
 
     pendingConnectId = cmd.id
     sendWorkerState(eventQueue, mcsConnecting, commandId = cmd.id, detail = "connect requested")
-    let connectRes = connectLowLevelClient(client, cmd.host, cmd.port, cmd.keepalive)
+    let connectRes = startConnectUsingCommand(client, cmd)
     if connectRes.isErr:
       pendingConnectId = 0
       sendWorkerError(eventQueue, connectRes.error, cmd.id)

@@ -44,6 +44,7 @@ type
     state: MqttConnectionState
     pending: MqttPendingOperations
     queue: MqttQueueSnapshot
+    connectProperties: MqttConnectProperties
     reconnectPolicy: MqttReconnectPolicy
     offlineQueuePolicy: MqttOfflineQueuePolicy
     closed: bool
@@ -166,6 +167,7 @@ proc startMqttClient*(clientId = ""; cleanSession = true;
   client.state = mcsDisconnected
   client.pending = emptyPendingOperations()
   client.queue = emptyQueueSnapshot()
+  client.connectProperties = noConnectProperties()
   client.reconnectPolicy = noReconnect()
   client.offlineQueuePolicy = noOfflineQueue()
   client.closed = false
@@ -215,6 +217,32 @@ proc msgQueue*(client: MqttClient): int {.inline.} =
   if client.isNil:
     return 0
   result = client.queue.total
+
+proc connectProperties*(client: MqttClient): MqttConnectProperties {.inline.} =
+  ## Return the MQTT v5 CONNECT properties attached to future connect commands.
+  if client.isNil:
+    return noConnectProperties()
+  result = client.connectProperties
+
+proc setConnectProperties*(client: MqttClient;
+                           properties: MqttConnectProperties): MqttResult[MqttOk] =
+  ## Store MQTT v5 CONNECT properties for future connect commands.
+  ##
+  ## These properties are only valid when the connection uses protocolVersion =
+  ## mpv5. The worker performs the same check before calling libmosquitto.
+  let openRes = client.ensureOpen("set MQTT connect properties")
+  if openRes.isErr:
+    return err(openRes.error)
+
+  let validateRes = validateConnectProperties(properties, "set MQTT connect properties")
+  if validateRes.isErr:
+    return err(validateRes.error)
+
+  client.connectProperties = properties
+  result = ok(MqttOk())
+
+proc clearConnectProperties*(client: MqttClient): MqttResult[MqttOk] =
+  result = client.setConnectProperties(noConnectProperties())
 
 proc reconnectPolicy*(client: MqttClient): MqttReconnectPolicy {.inline.} =
   ## Return the reconnect policy that will be attached to future connect commands.
@@ -397,14 +425,26 @@ proc connect*(client: MqttClient; host: string; port = 1883;
               keepalive = 60; protocolVersion = mpv311;
               username = ""; password = "";
               tls: MqttTlsConfig = MqttTlsConfig(enabled: false);
-              will: MqttWill = MqttWill(enabled: false, qos: qos0)): MqttResult[int] =
+              will: MqttWill = MqttWill(enabled: false, qos: qos0);
+              connectProperties: MqttConnectProperties = MqttConnectProperties()): MqttResult[int] =
   let policy = if client.isNil: noReconnect() else: client.reconnectPolicy
   let offlinePolicy = if client.isNil: noOfflineQueue() else: client.offlineQueuePolicy
+  let storedConnectProperties = if client.isNil: noConnectProperties() else: client.connectProperties
+  let connectProps = if connectProperties.hasProperties(): connectProperties else: storedConnectProperties
+
+  if protocolVersion != mpv5 and connectProps.hasProperties():
+    return err(invalidArgument("connect MQTT client", "CONNECT properties require MQTT 5"))
+
+  let validateConnectProps = validateConnectProperties(connectProps, "connect MQTT client properties")
+  if validateConnectProps.isErr:
+    return err(validateConnectProps.error)
+
   var cmd = connectCommand(
     host,
     port = port,
     keepalive = keepalive,
     protocolVersion = protocolVersion,
+    connectProperties = connectProps,
     username = username,
     password = password,
     tls = tls,

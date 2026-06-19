@@ -39,6 +39,7 @@ type
     port: int
     keepalive: int
     protocolVersion: MqttProtocolVersion
+    connectProperties: MqttConnectProperties
     cleanSession: bool
     sslOn: bool
     username: string
@@ -218,6 +219,7 @@ proc newMqttCtx*(clientId: string): MqttCtx =
   result.port = 1883
   result.keepalive = 60
   result.protocolVersion = mpv311
+  result.connectProperties = noConnectProperties()
   result.cleanSession = true
   result.sslOn = false
   result.reconnectPolicy = defaultNmqttReconnectPolicy()
@@ -238,6 +240,32 @@ proc setProtocolVersion*(ctx: MqttCtx; protocolVersion: MqttProtocolVersion) =
   ## that require MQTT v5.
   ctx.requireCtx("set MQTT protocol version")
   ctx.protocolVersion = protocolVersion
+
+proc connectProperties*(ctx: MqttCtx): MqttConnectProperties =
+  ## Return the MQTT v5 CONNECT properties used for future starts/connects.
+  if ctx.isNil:
+    return noConnectProperties()
+  result = ctx.connectProperties
+
+proc setConnectProperties*(ctx: MqttCtx;
+                           properties: MqttConnectProperties): MqttResult[MqttOk] =
+  ## Store MQTT v5 CONNECT properties for future starts/connects.
+  ##
+  ## These properties are sent only when protocolVersion is mpv5. The highlevel
+  ## client rejects non-empty CONNECT properties on MQTT 3.1.1 connections.
+  if ctx.isNil:
+    return err(invalidState("set nmqtt connect properties", "context is nil"))
+
+  let validateRes = validateConnectProperties(properties, "set nmqtt connect properties")
+  if validateRes.isErr:
+    ctx.setLastError(validateRes.error)
+    return err(validateRes.error)
+
+  ctx.connectProperties = properties
+  result = ok(MqttOk())
+
+proc clearConnectProperties*(ctx: MqttCtx): MqttResult[MqttOk] =
+  result = ctx.setConnectProperties(noConnectProperties())
 
 proc set_ping_interval*(ctx: MqttCtx; txInterval: int) =
   ctx.requireCtx("set MQTT ping interval")
@@ -380,6 +408,10 @@ proc connect*(ctx: MqttCtx) {.async.} =
     let willQos = ctx.qosFromInt(ctx.willQos, "connect MQTT client will")
     will = mqttWill(ctx.willTopic, ctx.willMessage, qos = willQos, retain = ctx.willRetain)
 
+  let connectPropsRes = ctx.client.setConnectProperties(ctx.connectProperties)
+  if connectPropsRes.isErr:
+    ctx.raiseCompat(connectPropsRes.error)
+
   let policyRes = ctx.client.setReconnectPolicy(ctx.reconnectPolicy)
   if policyRes.isErr:
     ctx.raiseCompat(policyRes.error)
@@ -396,7 +428,8 @@ proc connect*(ctx: MqttCtx) {.async.} =
     username = ctx.username,
     password = ctx.password,
     tls = tls,
-    will = will
+    will = will,
+    connectProperties = ctx.connectProperties
   )
   if connectRes.isErr:
     ctx.raiseCompat(connectRes.error)

@@ -67,7 +67,16 @@ The default is `mpv311`.
 
 ### MQTT v5 properties
 
-Currently supported:
+Currently supported for CONNECT:
+
+- `MqttConnectProperties`
+- `setSessionExpiryInterval(seconds)`
+- `setReceiveMaximum(maximum)`
+- `setMaximumPacketSize(bytes)`
+- `setRequestProblemInformation(enabled)`
+- `addUserProperty(name, value)`
+
+Currently supported for PUBLISH:
 
 - `userProperty(name, value)`
 - `responseTopic(topic)`
@@ -77,7 +86,7 @@ Currently supported:
 - `payloadFormatIndicatorUtf8()`
 - `payloadFormatIndicatorUnspecified()`
 
-For new code, convert these helpers to `MqttPublishProperties` with `mqttPublishProperties(...)` and pass the typed container to `publishV5()`. The older `MqttProperties` overload remains available for compatibility.
+For new PUBLISH code, convert these helpers to `MqttPublishProperties` with `mqttPublishProperties(...)` and pass the typed container to `publishV5()`. The older `MqttProperties` overload remains available for compatibility.
 
 Typed containers added for API separation:
 
@@ -85,7 +94,7 @@ Typed containers added for API separation:
 - `MqttPublishProperties`
 - `MqttSubscribeProperties`
 
-Only `MqttPublishProperties` is wired to publish APIs at this step. CONNECT and SUBSCRIBE property transmission will be added separately.
+`MqttConnectProperties` is wired into MQTT v5 CONNECT. `MqttPublishProperties` is wired into publish APIs. `MqttSubscribeProperties` is reserved for the next subscribe-property step.
 
 ## 2. Worker API
 
@@ -250,9 +259,20 @@ subscribe/unsubscribe acknowledgements.
 
 ### Extension API
 
-`publishV5()` is provided as an extension for MQTT v5 properties.
+`setConnectProperties()` configures MQTT v5 CONNECT metadata, and `publishV5()` sends MQTT v5 PUBLISH metadata.
 
-Example:
+CONNECT example:
+
+```nim
+var connectProps = noConnectProperties()
+connectProps.setSessionExpiryInterval(3600'u32)
+connectProps.setReceiveMaximum(16'u16)
+connectProps.setRequestProblemInformation(true)
+discard ctx.setConnectProperties(connectProps)
+ctx.setProtocolVersion(mpv5)
+```
+
+PUBLISH example:
 
 ```nim
 var props = noPublishProperties()

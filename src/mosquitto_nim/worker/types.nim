@@ -91,6 +91,7 @@ type
     port*: int
     keepalive*: int
     protocolVersion*: MqttProtocolVersion
+    connectProperties*: MqttConnectProperties
     reconnectPolicy*: MqttReconnectPolicy
     offlineQueuePolicy*: MqttOfflineQueuePolicy
     username*: string
@@ -342,6 +343,7 @@ proc connectCommand*(host: string; port = 1883; keepalive = 60;
                      username = ""; password = "";
                      tls: MqttTlsConfig = MqttTlsConfig(enabled: false);
                      will: MqttWill = MqttWill(enabled: false, qos: qos0);
+                     connectProperties: MqttConnectProperties = MqttConnectProperties();
                      id = 0): MqttCommand =
   result = MqttCommand(
     id: id,
@@ -350,6 +352,7 @@ proc connectCommand*(host: string; port = 1883; keepalive = 60;
     port: port,
     keepalive: keepalive,
     protocolVersion: protocolVersion,
+    connectProperties: connectProperties,
     reconnectPolicy: reconnectPolicy,
     offlineQueuePolicy: offlineQueuePolicy,
     username: username,
@@ -538,9 +541,10 @@ proc summary*(command: MqttCommand): string =
     let auth = if command.username.len > 0: ", auth=true" else: ""
     let tls = if command.tls.enabled: ", tls=true" else: ""
     let will = if command.will.enabled: ", will=true" else: ""
+    let connectProps = if command.connectProperties.hasProperties(): ", connectProperties=true" else: ""
     let reconnect = if command.reconnectPolicy.enabled: ", reconnect=true" else: ""
     let offlineQueue = if command.offlineQueuePolicy.enabled: ", offlineQueue=true" else: ""
-    result = &"{command.kind}(id={command.id}, host={command.host}, port={command.port}, protocol={command.protocolVersion}{auth}{tls}{will}{reconnect}{offlineQueue})"
+    result = &"{command.kind}(id={command.id}, host={command.host}, port={command.port}, protocol={command.protocolVersion}{auth}{tls}{will}{connectProps}{reconnect}{offlineQueue})"
   of mckPublish:
     let props = if command.properties.len > 0: &", properties={command.properties.len}" else: ""
     result = &"{command.kind}(id={command.id}, topic={command.topic}, payloadLen={command.payload.len}, qos={command.qos}, retain={command.retain}{props})"

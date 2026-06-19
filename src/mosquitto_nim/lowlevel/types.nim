@@ -84,11 +84,13 @@ type
   MqttConnectProperties* = object
     ## Typed MQTT v5 CONNECT properties.
     ##
-    ## This is an API-level container for future CONNECT property plumbing.
-    ## Existing connect paths still do not send MQTT v5 CONNECT properties yet.
+    ## These properties are valid on MQTT v5 CONNECT packets.  They are kept
+    ## separate from PUBLISH/SUBSCRIBE properties so high-level code cannot
+    ## accidentally attach packet-specific metadata to the wrong operation.
     sessionExpiryInterval*: Option[uint32]
     receiveMaximum*: Option[uint16]
     maximumPacketSize*: Option[uint32]
+    requestProblemInformation*: Option[bool]
     userProperties*: seq[(string, string)]
 
   MqttPublishProperties* = object
@@ -305,6 +307,71 @@ proc payloadFormatIndicatorUnspecified*(): MqttProperty =
 proc noConnectProperties*(): MqttConnectProperties =
   ## Construct an empty typed MQTT v5 CONNECT property set.
   result = MqttConnectProperties()
+
+proc mqttConnectProperties*(
+    sessionExpiryInterval: Option[uint32] = none(uint32);
+    receiveMaximum: Option[uint16] = none(uint16);
+    maximumPacketSize: Option[uint32] = none(uint32);
+    requestProblemInformation: Option[bool] = none(bool)
+  ): MqttConnectProperties =
+  ## Construct a typed MQTT v5 CONNECT property set.
+  ##
+  ## Validation is performed by validateConnectProperties() and by the lowlevel
+  ## libmosquitto property builder. Keeping this constructor allocation-only lets
+  ## tests and callers construct values first, then validate at API boundaries.
+  result = MqttConnectProperties(
+    sessionExpiryInterval: sessionExpiryInterval,
+    receiveMaximum: receiveMaximum,
+    maximumPacketSize: maximumPacketSize,
+    requestProblemInformation: requestProblemInformation
+  )
+
+proc hasProperties*(properties: MqttConnectProperties): bool =
+  ## Return true when the CONNECT property set carries at least one property.
+  result = properties.sessionExpiryInterval.isSome or
+           properties.receiveMaximum.isSome or
+           properties.maximumPacketSize.isSome or
+           properties.requestProblemInformation.isSome or
+           properties.userProperties.len > 0
+
+proc validateConnectProperties*(properties: MqttConnectProperties;
+                                context = "MQTT connect properties"): MqttResult[MqttOk] =
+  ## Validate typed MQTT v5 CONNECT properties before they reach libmosquitto.
+  ##
+  ## Session Expiry Interval may be 0. Receive Maximum and Maximum Packet Size
+  ## use MQTT v5 encodings where 0 is invalid. User Property names are kept
+  ## non-empty to avoid ambiguous broker-side metadata.
+  if properties.receiveMaximum.isSome and properties.receiveMaximum.get() == 0'u16:
+    return err(invalidArgument(context, "Receive Maximum must be at least 1"))
+
+  if properties.maximumPacketSize.isSome and properties.maximumPacketSize.get() == 0'u32:
+    return err(invalidArgument(context, "Maximum Packet Size must be at least 1"))
+
+  for item in properties.userProperties:
+    if item[0].len == 0:
+      return err(invalidArgument(context, "User Property name must not be empty"))
+
+  result = ok(MqttOk())
+
+proc addUserProperty*(properties: var MqttConnectProperties; name, value: string) =
+  ## Add a User Property to a typed CONNECT property set.
+  properties.userProperties.add((name, value))
+
+proc setSessionExpiryInterval*(properties: var MqttConnectProperties; seconds: uint32) =
+  ## Set MQTT v5 Session Expiry Interval in seconds.
+  properties.sessionExpiryInterval = some(seconds)
+
+proc setReceiveMaximum*(properties: var MqttConnectProperties; maximum: uint16) =
+  ## Set MQTT v5 Receive Maximum.
+  properties.receiveMaximum = some(maximum)
+
+proc setMaximumPacketSize*(properties: var MqttConnectProperties; bytes: uint32) =
+  ## Set MQTT v5 Maximum Packet Size.
+  properties.maximumPacketSize = some(bytes)
+
+proc setRequestProblemInformation*(properties: var MqttConnectProperties; enabled: bool) =
+  ## Set MQTT v5 Request Problem Information.
+  properties.requestProblemInformation = some(enabled)
 
 proc noPublishProperties*(): MqttPublishProperties =
   ## Construct an empty typed MQTT v5 PUBLISH property set.
