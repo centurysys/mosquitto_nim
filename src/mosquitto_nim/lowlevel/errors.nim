@@ -49,6 +49,18 @@ proc invalidArgument*(context, message: string): MqttError =
 proc invalidState*(context, message: string): MqttError =
   result = makeError(meInvalidState, context, message)
 
+proc protocolReason*(context: string; reasonCode: int): MqttError =
+  ## Create an error for MQTT-level reason codes reported by callbacks.
+  ##
+  ## This is deliberately separate from libmosquitto return-code errors.  The
+  ## former is broker/protocol state; the latter is a local C API result.
+  result = makeError(
+    meProtocolReason,
+    context,
+    &"MQTT reason code {reasonCode}",
+    reasonCode
+  )
+
 # ------------------------------------------------------------------------------
 # libmosquitto error helpers
 # ------------------------------------------------------------------------------

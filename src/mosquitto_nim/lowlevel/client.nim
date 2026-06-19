@@ -20,6 +20,7 @@ type
   LowLevelClient* = ref object
     raw: ptr struct_mosquitto
     messageSink: MessageSink
+    controlSink: ControlSink
     callbackError: Option[MqttError]
 
 proc isClosed*(client: LowLevelClient): bool =
@@ -35,6 +36,108 @@ proc rememberCallbackError(client: LowLevelClient; error: MqttError) =
   if not client.isNil:
     client.callbackError = some(error)
 
+proc emitControlEvent(client: LowLevelClient; event: sink LowLevelControlEvent) =
+  if client.isNil or client.isClosed or client.controlSink.isNil:
+    return
+
+  try:
+    client.controlSink(event)
+  except CatchableError as e:
+    client.rememberCallbackError(invalidState("control callback", e.msg))
+
+proc clientFromUserdata(userdata: pointer): LowLevelClient =
+  if userdata == nil:
+    return nil
+
+  result = cast[LowLevelClient](userdata)
+  if result.isNil or result.isClosed:
+    return nil
+
+proc onLowLevelConnect(mosq: ptr struct_mosquitto; userdata: pointer;
+                       reasonCode: cint; flags: cint;
+                       properties: ptr mosquitto_property) {.cdecl.} =
+  discard mosq
+  discard properties
+
+  let client = clientFromUserdata(userdata)
+  if client.isNil:
+    return
+
+  client.emitControlEvent(LowLevelControlEvent(
+    kind: lleConnected,
+    reasonCode: reasonCode.int,
+    flags: flags.int
+  ))
+
+proc onLowLevelDisconnect(mosq: ptr struct_mosquitto; userdata: pointer;
+                          reasonCode: cint;
+                          properties: ptr mosquitto_property) {.cdecl.} =
+  discard mosq
+  discard properties
+
+  let client = clientFromUserdata(userdata)
+  if client.isNil:
+    return
+
+  client.emitControlEvent(LowLevelControlEvent(
+    kind: lleDisconnected,
+    reasonCode: reasonCode.int
+  ))
+
+proc onLowLevelPublish(mosq: ptr struct_mosquitto; userdata: pointer;
+                       mid: cint; reasonCode: cint;
+                       properties: ptr mosquitto_property) {.cdecl.} =
+  discard mosq
+  discard properties
+
+  let client = clientFromUserdata(userdata)
+  if client.isNil:
+    return
+
+  client.emitControlEvent(LowLevelControlEvent(
+    kind: llePublishCompleted,
+    mid: mid.int,
+    reasonCode: reasonCode.int
+  ))
+
+proc onLowLevelSubscribe(mosq: ptr struct_mosquitto; userdata: pointer;
+                         mid: cint; qosCount: cint; grantedQos: ptr cint;
+                         properties: ptr mosquitto_property) {.cdecl.} =
+  discard mosq
+  discard properties
+
+  let client = clientFromUserdata(userdata)
+  if client.isNil:
+    return
+
+  var granted: seq[int] = @[]
+  if qosCount > 0 and grantedQos != nil:
+    let rawGranted = cast[ptr UncheckedArray[cint]](grantedQos)
+    granted = newSeq[int](qosCount.int)
+    for i in 0 ..< qosCount.int:
+      granted[i] = rawGranted[i].int
+
+  client.emitControlEvent(LowLevelControlEvent(
+    kind: lleSubscribed,
+    mid: mid.int,
+    grantedQos: granted
+  ))
+
+proc onLowLevelUnsubscribe(mosq: ptr struct_mosquitto; userdata: pointer;
+                           mid: cint;
+                           properties: ptr mosquitto_property) {.cdecl.} =
+  discard mosq
+  discard properties
+
+  let client = clientFromUserdata(userdata)
+  if client.isNil:
+    return
+
+  client.emitControlEvent(LowLevelControlEvent(
+    kind: lleUnsubscribed,
+    mid: mid.int
+  ))
+
 proc onLowLevelMessage(mosq: ptr struct_mosquitto; userdata: pointer;
                        message: ptr struct_mosquitto_message;
                        properties: ptr mosquitto_property) {.cdecl.} =
@@ -45,11 +148,8 @@ proc onLowLevelMessage(mosq: ptr struct_mosquitto; userdata: pointer;
   ## to the low-level sink. Higher layers will use the sink to enqueue events.
   discard mosq
 
-  if userdata == nil:
-    return
-
-  let client = cast[LowLevelClient](userdata)
-  if client.isNil or client.isClosed:
+  let client = clientFromUserdata(userdata)
+  if client.isNil:
     return
 
   let msgRes = copyMessage(message, properties)
@@ -84,6 +184,11 @@ proc newLowLevelClient*(clientId: string; cleanSession = true): MqttResult[LowLe
 
   let client = LowLevelClient(raw: raw)
   mosquitto_user_data_set(raw, cast[pointer](client))
+  mosquitto_connect_v5_callback_set(raw, onLowLevelConnect)
+  mosquitto_disconnect_v5_callback_set(raw, onLowLevelDisconnect)
+  mosquitto_publish_v5_callback_set(raw, onLowLevelPublish)
+  mosquitto_subscribe_v5_callback_set(raw, onLowLevelSubscribe)
+  mosquitto_unsubscribe_v5_callback_set(raw, onLowLevelUnsubscribe)
   mosquitto_message_v5_callback_set(raw, onLowLevelMessage)
 
   result = ok(client)
@@ -100,6 +205,7 @@ proc closeLowLevelClient*(client: LowLevelClient): MqttResult[MqttOk] =
   mosquitto_destroy(client.raw)
   client.raw = nil
   client.messageSink = nil
+  client.controlSink = nil
   result = ok(MqttOk())
 
 # ------------------------------------------------------------------------------
@@ -123,6 +229,26 @@ proc clearMessageSink*(client: LowLevelClient): MqttResult[MqttOk] =
     return err(rawRes.error)
 
   client.messageSink = nil
+  result = ok(MqttOk())
+
+proc setControlSink*(client: LowLevelClient; sink: ControlSink): MqttResult[MqttOk] =
+  ## Install a low-level control/ack sink.
+  ##
+  ## The sink receives callback notifications such as CONNACK, PUBACK/PUBCOMP,
+  ## SUBACK, and UNSUBACK from the thread driving `loopLowLevelClient()`.
+  let rawRes = requireOpen(client, "set control sink")
+  if rawRes.isErr:
+    return err(rawRes.error)
+
+  client.controlSink = sink
+  result = ok(MqttOk())
+
+proc clearControlSink*(client: LowLevelClient): MqttResult[MqttOk] =
+  let rawRes = requireOpen(client, "clear control sink")
+  if rawRes.isErr:
+    return err(rawRes.error)
+
+  client.controlSink = nil
   result = ok(MqttOk())
 
 proc lastCallbackError*(client: LowLevelClient): Option[MqttError] =
@@ -269,12 +395,7 @@ proc subscribeLowLevelClient*(client: LowLevelClient; topicFilter: string;
     return err(topicRes.error)
 
   var mid: cint
-  let rc = mosquitto_subscribe(
-    rawRes.get(),
-    addr mid,
-    topicFilter.cstring,
-    qos.toInt().cint
-  )
+  let rc = mosquitto_subscribe(rawRes.get(), addr mid, topicFilter.cstring, qos.toInt().cint)
   let rcRes = checkMosq(rc, "mosquitto_subscribe")
   if rcRes.isErr:
     return err(rcRes.error)

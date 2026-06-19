@@ -45,12 +45,39 @@ type
     dup*: bool
     properties*: MqttProperties
 
+  LowLevelControlEventKind* = enum
+    lleConnected
+    lleDisconnected
+    llePublishCompleted
+    lleSubscribed
+    lleUnsubscribed
+
+  LowLevelControlEvent* = object
+    ## Nim-owned control/ack callback event from libmosquitto.
+    ##
+    ## These events model callback notifications such as CONNACK, DISCONNECT,
+    ## PUBACK/PUBCOMP completion, SUBACK, and UNSUBACK.  They are intentionally
+    ## kept at the lowlevel boundary so higher layers can decide which timing
+    ## semantics to expose.
+    kind*: LowLevelControlEventKind
+    mid*: int
+    reasonCode*: int
+    flags*: int
+    grantedQos*: seq[int]
+    properties*: MqttProperties
+
   MessageSink* = proc(message: MqttMessage)
     ## Low-level message sink used by the libmosquitto callback trampoline.
     ##
     ## The sink is called from whichever thread drives `loopLowLevelClient()`.
     ## Higher layers must not use this as an application callback boundary;
     ## worker/async layers should use it only to enqueue copied messages.
+
+  ControlSink* = proc(event: LowLevelControlEvent)
+    ## Low-level control sink used by libmosquitto ack/state callback trampolines.
+    ##
+    ## This is not an application callback boundary.  Worker/highlevel layers use
+    ## it to translate libmosquitto notifications into worker events.
 
 # ------------------------------------------------------------------------------
 # Formatting / conversion helpers

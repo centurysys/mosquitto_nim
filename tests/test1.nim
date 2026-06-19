@@ -71,7 +71,7 @@ suite "mosquitto_nim lowlevel smoke test":
     check validateSubscribeTopic("mosquitto_nim/+").isOk
     check validateSubscribeTopic("").isErr
 
-  test "message sink can be installed and cleared":
+  test "message and control sinks can be installed and cleared":
     check initLibrary().isOk
 
     let clientRes = newLowLevelClient("mosquitto_nim_step4_sink")
@@ -82,9 +82,15 @@ suite "mosquitto_nim lowlevel smoke test":
     let sink: MessageSink = proc(message: MqttMessage) =
       received.add(message)
 
+    var controls: seq[LowLevelControlEvent] = @[]
+    let controlSink: ControlSink = proc(event: LowLevelControlEvent) =
+      controls.add(event)
+
     check setMessageSink(client, sink).isOk
+    check setControlSink(client, controlSink).isOk
     check lastCallbackError(client).isNone
     check clearMessageSink(client).isOk
+    check clearControlSink(client).isOk
     check closeLowLevelClient(client).isOk
 
     check cleanupLibrary().isOk
@@ -124,9 +130,14 @@ suite "mosquitto_nim worker value types":
   test "worker command and event summaries are available":
     let cmd = connectCommand("127.0.0.1", port = 1883, keepalive = 30, id = 1)
     let ev = connectedEvent(commandId = 1)
+    let accepted = publishAcceptedEvent(mid = 12, commandId = 2)
+    let completed = publishCompletedEvent(mid = 12, commandId = 2, reasonCode = 0)
 
     check cmd.summary().contains("127.0.0.1")
     check ev.summary().contains("commandId=1")
+    check accepted.kind == mevPublishAccepted
+    check completed.kind == mevPublishCompleted
+    check completed.mid == 12
 
 
 suite "mosquitto_nim worker lifecycle":
@@ -158,7 +169,7 @@ suite "mosquitto_nim worker lifecycle":
       check not worker.isStarted
 
   test "worker reports invalid connect commands as error events":
-    let workerRes = startMqttWorker("mosquitto_nim_step7_worker_error")
+    let workerRes = startMqttWorker("mosquitto_nim_step8_worker_error")
     check workerRes.isOk
 
     if workerRes.isOk:
@@ -273,9 +284,9 @@ when getEnv("MOSQUITTO_NIM_TEST_BROKER") == "1":
     test "worker can connect, subscribe, publish, receive, disconnect, and stop":
       let host = getEnv("MOSQUITTO_NIM_TEST_HOST", "127.0.0.1")
       let port = parseInt(getEnv("MOSQUITTO_NIM_TEST_PORT", "1883"))
-      let topic = "mosquitto_nim/step7/worker/" & $getTime().toUnix() & "_" & $getCurrentProcessId()
+      let topic = "mosquitto_nim/step8/worker/" & $getTime().toUnix() & "_" & $getCurrentProcessId()
 
-      let workerRes = startMqttWorker("mosquitto_nim_step7_worker", loopTimeoutMs = 10)
+      let workerRes = startMqttWorker("mosquitto_nim_step8_worker", loopTimeoutMs = 10)
       check workerRes.isOk
 
       if workerRes.isOk:
@@ -324,17 +335,25 @@ when getEnv("MOSQUITTO_NIM_TEST_BROKER") == "1":
 
         check worker.sendCommand(publishCommand(topic, "hello-worker", qos1, retain = false, id = 203)).isOk
 
-        var sawPublished = false
+        var sawPublishAccepted = false
+        var sawPublishCompleted = false
         var sawMessage = false
+        var acceptedMid = 0
         for _ in 0 ..< 300:
           var event: MqttEvent
           let recvRes = worker.tryReceiveEvent(event)
           check recvRes.isOk
           if recvRes.isOk and recvRes.get():
             case event.kind
-            of mevPublished:
+            of mevPublishAccepted:
               if event.commandId == 203:
-                sawPublished = true
+                sawPublishAccepted = true
+                acceptedMid = event.mid
+            of mevPublishCompleted:
+              if event.commandId == 203:
+                sawPublishCompleted = true
+                if acceptedMid != 0:
+                  check event.mid == acceptedMid
             of mevMessageReceived:
               if event.message.topic == topic:
                 sawMessage = true
@@ -345,11 +364,12 @@ when getEnv("MOSQUITTO_NIM_TEST_BROKER") == "1":
             else:
               discard
 
-            if sawPublished and sawMessage:
+            if sawPublishAccepted and sawPublishCompleted and sawMessage:
               break
           sleep(10)
 
-        check sawPublished
+        check sawPublishAccepted
+        check sawPublishCompleted
         check sawMessage
 
         check worker.sendCommand(disconnectCommand(id = 204)).isOk

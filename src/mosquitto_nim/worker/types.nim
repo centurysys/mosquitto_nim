@@ -9,8 +9,8 @@ import ../lowlevel/types
 # Worker command/event value types.
 #
 # These types are intentionally pure Nim data. They are meant to cross
-# threadtools queues in later steps, so they must not contain libmosquitto raw
-# pointers, callbacks, Future objects, or other thread-affine state.
+# threadtools queues, so they must not contain libmosquitto raw pointers,
+# callbacks, Future objects, or other thread-affine state.
 # ------------------------------------------------------------------------------
 type
   MqttCommandKind* = enum
@@ -24,7 +24,8 @@ type
   MqttEventKind* = enum
     mevConnected
     mevDisconnected
-    mevPublished
+    mevPublishAccepted
+    mevPublishCompleted
     mevSubscribed
     mevUnsubscribed
     mevMessageReceived
@@ -58,6 +59,9 @@ type
     message*: MqttMessage
     error*: MqttError
     detail*: string
+    reasonCode*: int
+    flags*: int
+    grantedQos*: seq[int]
 
 # ------------------------------------------------------------------------------
 # Payload helpers
@@ -135,17 +139,45 @@ proc unsubscribeCommand*(topicFilter: string; id = 0): MqttCommand =
 # ------------------------------------------------------------------------------
 # Event constructors
 # ------------------------------------------------------------------------------
-proc connectedEvent*(commandId = 0): MqttEvent =
-  result = MqttEvent(commandId: commandId, kind: mevConnected)
+proc connectedEvent*(commandId = 0; reasonCode = 0; flags = 0): MqttEvent =
+  result = MqttEvent(
+    commandId: commandId,
+    kind: mevConnected,
+    reasonCode: reasonCode,
+    flags: flags
+  )
 
-proc disconnectedEvent*(commandId = 0; detail = ""): MqttEvent =
-  result = MqttEvent(commandId: commandId, kind: mevDisconnected, detail: detail)
+proc disconnectedEvent*(commandId = 0; detail = ""; reasonCode = 0): MqttEvent =
+  result = MqttEvent(
+    commandId: commandId,
+    kind: mevDisconnected,
+    detail: detail,
+    reasonCode: reasonCode
+  )
 
-proc publishedEvent*(mid: int; commandId = 0): MqttEvent =
-  result = MqttEvent(commandId: commandId, kind: mevPublished, mid: mid)
+proc publishAcceptedEvent*(mid: int; commandId = 0): MqttEvent =
+  ## PUBLISH was accepted by libmosquitto and assigned a message id.
+  ##
+  ## This is intentionally separate from PublishCompleted, which is emitted by
+  ## libmosquitto's on_publish callback after QoS1/2 completion.
+  result = MqttEvent(commandId: commandId, kind: mevPublishAccepted, mid: mid)
 
-proc subscribedEvent*(mid: int; commandId = 0): MqttEvent =
-  result = MqttEvent(commandId: commandId, kind: mevSubscribed, mid: mid)
+proc publishCompletedEvent*(mid: int; commandId = 0; reasonCode = 0): MqttEvent =
+  ## PUBLISH completion callback was received from libmosquitto.
+  result = MqttEvent(
+    commandId: commandId,
+    kind: mevPublishCompleted,
+    mid: mid,
+    reasonCode: reasonCode
+  )
+
+proc subscribedEvent*(mid: int; commandId = 0; grantedQos: openArray[int] = []): MqttEvent =
+  result = MqttEvent(
+    commandId: commandId,
+    kind: mevSubscribed,
+    mid: mid,
+    grantedQos: @grantedQos
+  )
 
 proc unsubscribedEvent*(mid: int; commandId = 0): MqttEvent =
   result = MqttEvent(commandId: commandId, kind: mevUnsubscribed, mid: mid)
@@ -183,9 +215,13 @@ proc summary*(event: MqttEvent): string =
     result = &"{event.kind}(commandId={event.commandId}, topic={event.message.topic}, payloadLen={event.message.payload.len})"
   of mevError:
     result = &"{event.kind}(commandId={event.commandId}, error={event.error})"
-  of mevPublished, mevSubscribed, mevUnsubscribed:
-    result = &"{event.kind}(commandId={event.commandId}, mid={event.mid})"
+  of mevPublishAccepted, mevPublishCompleted, mevUnsubscribed:
+    result = &"{event.kind}(commandId={event.commandId}, mid={event.mid}, reasonCode={event.reasonCode})"
+  of mevSubscribed:
+    result = &"{event.kind}(commandId={event.commandId}, mid={event.mid}, grantedQos={event.grantedQos})"
   of mevDisconnected:
-    result = &"{event.kind}(commandId={event.commandId}, detail={event.detail})"
-  of mevConnected, mevStopped:
+    result = &"{event.kind}(commandId={event.commandId}, detail={event.detail}, reasonCode={event.reasonCode})"
+  of mevConnected:
+    result = &"{event.kind}(commandId={event.commandId}, reasonCode={event.reasonCode}, flags={event.flags})"
+  of mevStopped:
     result = &"{event.kind}(commandId={event.commandId})"
