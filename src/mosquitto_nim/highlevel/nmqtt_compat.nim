@@ -131,6 +131,9 @@ proc handleCompatEvent(ctx: MqttCtx; event: MqttEvent): Future[void] {.async.} =
     ctx.state = mcsDisconnected
     ctx.connected = false
     ctx.pending = emptyPendingOperations()
+  of mevReconnectScheduled, mevReconnectAttempt:
+    ctx.state = mcsReconnecting
+    ctx.connected = false
   of mevPublishCompleted, mevSubscribed, mevUnsubscribed:
     if ctx.pendingCount > 0:
       dec ctx.pendingCount
@@ -263,8 +266,9 @@ proc setReconnectPolicy*(ctx: MqttCtx;
                          policy: MqttReconnectPolicy): MqttResult[MqttOk] =
   ## Store reconnect policy configuration for future starts/connects.
   ##
-  ## Step 24 validates and stores the policy only. Automatic reconnect itself is
-  ## intentionally left for the next implementation step.
+  ## Automatic reconnect attempts are scheduled by the worker after unexpected
+  ## disconnects or network-loop errors. Explicit disconnect/stop still cancels
+  ## reconnect scheduling.
   if ctx.isNil:
     return err(invalidState("set nmqtt reconnect policy", "context is nil"))
 
@@ -341,9 +345,9 @@ proc connect*(ctx: MqttCtx) {.async.} =
 proc start*(ctx: MqttCtx) {.async.} =
   ## Connect and start the asyncdispatch-side compatibility event pump.
   ##
-  ## This is the nmqtt-style entry point.  Automatic reconnect is intentionally
-  ## not implemented in this first compatibility step; the API shape is kept so
-  ## reconnect policy can be added behind the same surface later.
+  ## This is the nmqtt-style entry point.  When reconnect policy is enabled, the
+  ## worker may continue reconnect attempts after unexpected disconnects while
+  ## the compatibility event pump remains active.
   ctx.requireCtx("start MQTT client")
   if ctx.running:
     return

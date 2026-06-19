@@ -1,6 +1,6 @@
 # Destination: src/mosquitto_nim/worker/mosquitto_worker.nim
 
-import std/[os, options, tables, typedthreads]
+import std/[os, options, tables, times, typedthreads]
 
 import results
 import threadtools
@@ -41,6 +41,15 @@ type
     thread: Thread[MqttWorkerArgs]
     started: bool
     joined: bool
+
+  WorkerReconnectState = object
+    policy: MqttReconnectPolicy
+    lastConnectCommand: Option[MqttCommand]
+    scheduled: bool
+    reconnectAtMs: int64
+    attempt: int
+    explicitDisconnectRequested: bool
+    reconnectApiAvailable: bool
 
 # ------------------------------------------------------------------------------
 # Internal helpers
@@ -103,6 +112,119 @@ proc clearPendingOperations(pendingPublishes: var Table[int, int];
   pendingSubscribes.clear()
   pendingUnsubscribes.clear()
 
+proc nowMs(): int64 {.raises: [].} =
+  result = (epochTime() * 1000.0).int64
+
+proc cancelReconnect(reconnect: var WorkerReconnectState) {.raises: [].} =
+  reconnect.scheduled = false
+  reconnect.reconnectAtMs = 0
+
+proc resetReconnectAttempt(reconnect: var WorkerReconnectState) {.raises: [].} =
+  reconnect.attempt = 0
+  reconnect.cancelReconnect()
+
+proc canScheduleReconnect(reconnect: WorkerReconnectState): bool {.raises: [].} =
+  result = reconnect.policy.enabled and reconnect.lastConnectCommand.isSome() and
+           not reconnect.explicitDisconnectRequested
+
+proc reconnectCommandId(reconnect: WorkerReconnectState): int {.raises: [].} =
+  if reconnect.lastConnectCommand.isSome():
+    return reconnect.lastConnectCommand.get().id
+  result = 0
+
+proc scheduleReconnect(reconnect: var WorkerReconnectState;
+                       eventQueue: ThreadQueue[MqttEvent];
+                       detail = ""): bool {.raises: [].} =
+  ## Schedule the next automatic reconnect attempt using exponential backoff.
+  if not reconnect.canScheduleReconnect():
+    return false
+
+  inc reconnect.attempt
+  let delayMs = reconnect.policy.reconnectDelayMs(reconnect.attempt)
+  reconnect.reconnectAtMs = nowMs() + delayMs.int64
+  reconnect.scheduled = true
+
+  let commandId = reconnect.reconnectCommandId()
+  sendWorkerState(eventQueue, mcsReconnecting, commandId = commandId, detail = detail)
+  sendWorkerEvent(
+    eventQueue,
+    reconnectScheduledEvent(
+      delayMs,
+      reconnect.attempt,
+      commandId = commandId,
+      detail = detail
+    )
+  )
+  result = true
+
+proc applyConnectConfig(client: LowLevelClient; cmd: MqttCommand): MqttResult[MqttOk] =
+  ## Apply settings that libmosquitto requires before a connect attempt.
+  let protoRes = setProtocolVersion(client, cmd.protocolVersion)
+  if protoRes.isErr:
+    return err(protoRes.error)
+
+  let tlsRes = setTls(client, cmd.tls)
+  if tlsRes.isErr:
+    return err(tlsRes.error)
+
+  let authRes = setUsernamePassword(client, cmd.username, cmd.password)
+  if authRes.isErr:
+    return err(authRes.error)
+
+  let willRes = if cmd.will.enabled:
+      setWill(client, cmd.will.topic, cmd.will.payload, cmd.will.qos, cmd.will.retain)
+    else:
+      clearWill(client)
+  if willRes.isErr:
+    return err(willRes.error)
+
+  result = ok(MqttOk())
+
+proc startStoredReconnect(reconnect: var WorkerReconnectState;
+                          pendingConnectId: var int;
+                          loopActive: var bool;
+                          client: LowLevelClient;
+                          eventQueue: ThreadQueue[MqttEvent]) {.raises: [].} =
+  ## Start a scheduled reconnect attempt.
+  if not reconnect.scheduled or reconnect.lastConnectCommand.isNone():
+    return
+  if nowMs() < reconnect.reconnectAtMs:
+    return
+
+  reconnect.scheduled = false
+  let cmd = reconnect.lastConnectCommand.get()
+  pendingConnectId = cmd.id
+  sendWorkerEvent(
+    eventQueue,
+    reconnectAttemptEvent(
+      reconnect.attempt,
+      commandId = cmd.id,
+      detail = "automatic reconnect attempt"
+    )
+  )
+  sendWorkerState(eventQueue, mcsReconnecting, commandId = cmd.id, detail = "automatic reconnect attempt")
+
+  let connectRes = if reconnect.reconnectApiAvailable:
+      reconnectLowLevelClient(client)
+    else:
+      let configRes = applyConnectConfig(client, cmd)
+      if configRes.isErr:
+        pendingConnectId = 0
+        sendWorkerError(eventQueue, configRes.error, cmd.id)
+        discard scheduleReconnect(reconnect, eventQueue, detail = "reconnect config failed")
+        return
+      connectLowLevelClient(client, cmd.host, cmd.port, cmd.keepalive)
+
+  if connectRes.isErr:
+    pendingConnectId = 0
+    loopActive = false
+    sendWorkerError(eventQueue, connectRes.error, cmd.id)
+    discard scheduleReconnect(reconnect, eventQueue, detail = "reconnect attempt failed")
+    return
+
+  reconnect.reconnectApiAvailable = true
+  loopActive = true
+
 proc flushLoop(client: LowLevelClient; eventQueue: ThreadQueue[MqttEvent];
                loopActive: var bool; loopTimeoutMs: int; rounds: int) {.raises: [].} =
   ## Run a few manual-loop iterations and report failures as worker errors.
@@ -119,7 +241,7 @@ proc flushLoop(client: LowLevelClient; eventQueue: ThreadQueue[MqttEvent];
 proc handleCommand(command: sink MqttCommand; running: var bool;
                    loopActive: var bool; pendingConnectId: var int;
                    pendingDisconnectId: var int;
-                   reconnectPolicy: var MqttReconnectPolicy;
+                   reconnect: var WorkerReconnectState;
                    pendingPublishes: var Table[int, int];
                    pendingSubscribes: var Table[int, int];
                    pendingUnsubscribes: var Table[int, int];
@@ -134,6 +256,8 @@ proc handleCommand(command: sink MqttCommand; running: var bool;
 
   case cmd.kind
   of mckStop:
+    reconnect.explicitDisconnectRequested = true
+    reconnect.cancelReconnect()
     sendWorkerState(eventQueue, mcsStopping, commandId = cmd.id, detail = "stop requested")
     if loopActive:
       discard disconnectLowLevelClient(client)
@@ -159,33 +283,17 @@ proc handleCommand(command: sink MqttCommand; running: var bool;
       pendingConnectId = 0
       sendWorkerError(eventQueue, reconnectRes.error, cmd.id)
       return
-    reconnectPolicy = cmd.reconnectPolicy
 
-    let protoRes = setProtocolVersion(client, cmd.protocolVersion)
-    if protoRes.isErr:
-      pendingConnectId = 0
-      sendWorkerError(eventQueue, protoRes.error, cmd.id)
-      return
+    reconnect.policy = cmd.reconnectPolicy
+    reconnect.lastConnectCommand = some(cmd)
+    reconnect.explicitDisconnectRequested = false
+    reconnect.reconnectApiAvailable = false
+    reconnect.resetReconnectAttempt()
 
-    let tlsRes = setTls(client, cmd.tls)
-    if tlsRes.isErr:
+    let configRes = applyConnectConfig(client, cmd)
+    if configRes.isErr:
       pendingConnectId = 0
-      sendWorkerError(eventQueue, tlsRes.error, cmd.id)
-      return
-
-    let authRes = setUsernamePassword(client, cmd.username, cmd.password)
-    if authRes.isErr:
-      pendingConnectId = 0
-      sendWorkerError(eventQueue, authRes.error, cmd.id)
-      return
-
-    let willRes = if cmd.will.enabled:
-        setWill(client, cmd.will.topic, cmd.will.payload, cmd.will.qos, cmd.will.retain)
-      else:
-        clearWill(client)
-    if willRes.isErr:
-      pendingConnectId = 0
-      sendWorkerError(eventQueue, willRes.error, cmd.id)
+      sendWorkerError(eventQueue, configRes.error, cmd.id)
       return
 
     pendingConnectId = cmd.id
@@ -194,12 +302,18 @@ proc handleCommand(command: sink MqttCommand; running: var bool;
     if connectRes.isErr:
       pendingConnectId = 0
       sendWorkerError(eventQueue, connectRes.error, cmd.id)
+      discard scheduleReconnect(reconnect, eventQueue, detail = "connect attempt failed")
       return
 
+    reconnect.reconnectApiAvailable = true
     loopActive = true
     flushLoop(client, eventQueue, loopActive, loopTimeoutMs, rounds = 3)
+    if not loopActive:
+      discard scheduleReconnect(reconnect, eventQueue, detail = "connect loop failed")
 
   of mckDisconnect:
+    reconnect.explicitDisconnectRequested = true
+    reconnect.cancelReconnect()
     if not loopActive:
       sendWorkerState(eventQueue, mcsDisconnected, commandId = cmd.id, detail = "already disconnected")
       sendWorkerEvent(eventQueue, disconnectedEvent(commandId = cmd.id, detail = "already disconnected"))
@@ -297,7 +411,7 @@ proc workerMain(args: MqttWorkerArgs) {.thread.} =
   var running = true
   var pendingConnectId = 0
   var pendingDisconnectId = 0
-  var reconnectPolicy = noReconnect()
+  var reconnect = WorkerReconnectState(policy: noReconnect())
   var pendingPublishes = initTable[int, int]()
   var pendingSubscribes = initTable[int, int]()
   var pendingUnsubscribes = initTable[int, int]()
@@ -313,6 +427,9 @@ proc workerMain(args: MqttWorkerArgs) {.thread.} =
       pendingConnectId = 0
       if event.reasonCode == 0:
         loopActive = true
+        reconnect.explicitDisconnectRequested = false
+        reconnect.reconnectApiAvailable = true
+        reconnect.resetReconnectAttempt()
         sendWorkerState(args.eventQueue, mcsConnected, commandId = commandId, detail = "connect callback")
         sendWorkerEvent(
           args.eventQueue,
@@ -324,8 +441,10 @@ proc workerMain(args: MqttWorkerArgs) {.thread.} =
         sendWorkerError(args.eventQueue, protocolReason("MQTT connect callback", event.reasonCode), commandId)
 
     of lleDisconnected:
-      let commandId = pendingDisconnectId
+      let explicit = reconnect.explicitDisconnectRequested or pendingDisconnectId != 0
+      let commandId = if pendingDisconnectId != 0: pendingDisconnectId else: reconnect.reconnectCommandId()
       pendingDisconnectId = 0
+      pendingConnectId = 0
       loopActive = false
       clearPendingOperations(pendingPublishes, pendingSubscribes, pendingUnsubscribes)
       sendWorkerPending(args.eventQueue, pendingPublishes, pendingSubscribes, pendingUnsubscribes, commandId = commandId)
@@ -334,6 +453,8 @@ proc workerMain(args: MqttWorkerArgs) {.thread.} =
         args.eventQueue,
         disconnectedEvent(commandId = commandId, reasonCode = event.reasonCode)
       )
+      if not explicit:
+        discard scheduleReconnect(reconnect, args.eventQueue, detail = "unexpected disconnect")
 
     of llePublishCompleted:
       let commandId = pendingPublishes.getOrDefault(event.mid, 0)
@@ -387,7 +508,7 @@ proc workerMain(args: MqttWorkerArgs) {.thread.} =
         loopActive,
         pendingConnectId,
         pendingDisconnectId,
-        reconnectPolicy,
+        reconnect,
         pendingPublishes,
         pendingSubscribes,
         pendingUnsubscribes,
@@ -400,12 +521,17 @@ proc workerMain(args: MqttWorkerArgs) {.thread.} =
         let loopRes = loopLowLevelClient(client, timeoutMs = args.loopTimeoutMs)
         if loopRes.isErr:
           loopActive = false
+          pendingConnectId = 0
           clearPendingOperations(pendingPublishes, pendingSubscribes, pendingUnsubscribes)
           sendWorkerPending(args.eventQueue, pendingPublishes, pendingSubscribes, pendingUnsubscribes)
-          sendWorkerState(args.eventQueue, mcsError, detail = "mosquitto loop error")
           sendWorkerError(args.eventQueue, loopRes.error)
+          if not scheduleReconnect(reconnect, args.eventQueue, detail = "mosquitto loop error"):
+            sendWorkerState(args.eventQueue, mcsError, detail = "mosquitto loop error")
       else:
-        sleep(args.idleSleepMs)
+        if reconnect.scheduled and nowMs() >= reconnect.reconnectAtMs:
+          startStoredReconnect(reconnect, pendingConnectId, loopActive, client, args.eventQueue)
+        else:
+          sleep(args.idleSleepMs)
 
     let callbackError = lastCallbackError(client)
     if callbackError.isSome():

@@ -75,6 +75,8 @@ proc updateStateFromEvent(client: MqttClient; event: MqttEvent) =
   of mevDisconnected:
     client.state = mcsDisconnected
     client.pending = emptyPendingOperations()
+  of mevReconnectScheduled, mevReconnectAttempt:
+    client.state = mcsReconnecting
   of mevStopped:
     client.state = mcsStopped
     client.pending = emptyPendingOperations()
@@ -193,8 +195,9 @@ proc setReconnectPolicy*(client: MqttClient;
                          policy: MqttReconnectPolicy): MqttResult[MqttOk] =
   ## Store a reconnect policy for future connect commands.
   ##
-  ## Step 24 only performs validation and plumbing. Automatic reconnect attempts are
-  ## intentionally not scheduled yet.
+  ## Automatic reconnect attempts are scheduled by the worker after unexpected
+  ## disconnects or network-loop errors. Explicit disconnect/stop still cancels
+  ## reconnect scheduling.
   let openRes = client.ensureOpen("set MQTT reconnect policy")
   if openRes.isErr:
     return err(openRes.error)

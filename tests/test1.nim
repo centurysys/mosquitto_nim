@@ -1534,6 +1534,32 @@ suite "mosquitto_nim reconnect policy API":
       multiplier: 0.5
     )).isErr
 
+  test "reconnect backoff delay helper is capped by policy":
+    let policy = mqttReconnectPolicy(initialDelayMs = 100, maxDelayMs = 1000, multiplier = 2.0)
+    check policy.reconnectDelayMs(0) == 0
+    check policy.reconnectDelayMs(1) == 100
+    check policy.reconnectDelayMs(2) == 200
+    check policy.reconnectDelayMs(3) == 400
+    check policy.reconnectDelayMs(4) == 800
+    check policy.reconnectDelayMs(5) == 1000
+    check noReconnect().reconnectDelayMs(1) == 0
+
+  test "reconnect events carry attempt and delay metadata":
+    let scheduled = reconnectScheduledEvent(250, 3, commandId = 42, detail = "loop error")
+    check scheduled.kind == mevReconnectScheduled
+    check scheduled.state == mcsReconnecting
+    check scheduled.commandId == 42
+    check scheduled.reconnectDelayMs == 250
+    check scheduled.reconnectAttempt == 3
+    check scheduled.summary().contains("delayMs=250")
+
+    let attempt = reconnectAttemptEvent(4, commandId = 42, detail = "retry")
+    check attempt.kind == mevReconnectAttempt
+    check attempt.state == mcsReconnecting
+    check attempt.commandId == 42
+    check attempt.reconnectAttempt == 4
+    check attempt.summary().contains("attempt=4")
+
   test "highlevel client stores reconnect policy for future connect commands":
     let clientRes = startMqttClient("mosquitto_nim_step24_reconnect_policy", pollMs = 1)
     check clientRes.isOk
@@ -1600,6 +1626,82 @@ suite "mosquitto_nim reconnect policy API":
 
     check ctx.disableReconnect().isOk
     check not ctx.reconnectPolicy().enabled
+
+when getEnv("MOSQUITTO_NIM_TEST_RECONNECT_FAILURE") == "1":
+  suite "mosquitto_nim auto reconnect failure-path test":
+    test "highlevel client schedules reconnect after a failed connect attempt":
+      proc scenario(): Future[bool] {.async.} =
+        let clientRes = startMqttClient(
+          "mosquitto_nim_step25_reconnect_failure",
+          eventQueueLen = 128,
+          loopTimeoutMs = 10,
+          pollMs = 1
+        )
+        check clientRes.isOk
+        if clientRes.isErr:
+          return false
+
+        let client = clientRes.get()
+        check client.enableReconnect(initialDelayMs = 20, maxDelayMs = 20, multiplier = 1.0).isOk
+
+        let connectIdRes = client.connect("127.0.0.1", port = 1, keepalive = 1)
+        check connectIdRes.isOk
+        if connectIdRes.isErr:
+          discard client.requestStop()
+          discard client.joinMqttClient()
+          return false
+
+        var sawScheduled = false
+        var sawAttempt = false
+        for _ in 0 ..< 200:
+          let drainRes = client.drainEvents()
+          check drainRes.isOk
+          if drainRes.isOk:
+            for event in drainRes.get():
+              case event.kind
+              of mevReconnectScheduled:
+                if event.commandId == connectIdRes.get():
+                  sawScheduled = true
+                  check event.reconnectAttempt >= 1
+                  check event.reconnectDelayMs == 20
+                  check client.currentState() == mcsReconnecting
+              of mevReconnectAttempt:
+                if event.commandId == connectIdRes.get():
+                  sawAttempt = true
+                  check event.reconnectAttempt >= 1
+              of mevConnected:
+                checkpoint "port 1 unexpectedly accepted an MQTT connection; reconnect failure-path test is not meaningful on this host"
+              else:
+                discard
+          if sawScheduled and sawAttempt:
+            break
+          await sleepAsync(10)
+
+        check sawScheduled
+
+        let disconnectIdRes = client.disconnect()
+        check disconnectIdRes.isOk
+        let stopIdRes = client.requestStop()
+        check stopIdRes.isOk
+
+        var sawStopped = false
+        for _ in 0 ..< 100:
+          let drainRes = client.drainEvents()
+          check drainRes.isOk
+          if drainRes.isOk:
+            for event in drainRes.get():
+              if event.kind == mevStopped and event.commandId == stopIdRes.get():
+                sawStopped = true
+                break
+          if sawStopped:
+            break
+          await sleepAsync(10)
+
+        check sawStopped
+        check client.joinMqttClient().isOk
+        return sawScheduled and sawStopped
+
+      check waitFor scenario()
 
 suite "mosquitto_nim pending operation tracking":
   test "pending operation snapshots summarize in-flight operations":

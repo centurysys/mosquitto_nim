@@ -465,6 +465,18 @@ proc disconnectLowLevelClient*(client: LowLevelClient): MqttResult[MqttOk] =
 
   result = checkMosq(mosquitto_disconnect(rawRes.get()), "mosquitto_disconnect")
 
+proc reconnectLowLevelClient*(client: LowLevelClient): MqttResult[MqttOk] =
+  ## Ask libmosquitto to reconnect using the previous connection settings.
+  ##
+  ## This is used by the worker's explicit auto-reconnect state machine.  The
+  ## worker still drives the network manually with loopLowLevelClient(); it does
+  ## not use mosquitto_loop_start().
+  let rawRes = requireOpen(client, "mosquitto_reconnect")
+  if rawRes.isErr:
+    return err(rawRes.error)
+
+  result = checkMosq(mosquitto_reconnect(rawRes.get()), "mosquitto_reconnect")
+
 proc loopLowLevelClient*(client: LowLevelClient; timeoutMs = 50;
                          maxPackets = 1): MqttResult[MqttOk] =
   ## Drive libmosquitto's network loop once.

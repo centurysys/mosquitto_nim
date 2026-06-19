@@ -28,6 +28,7 @@ type
     mcsConnecting
     mcsConnected
     mcsDisconnecting
+    mcsReconnecting
     mcsStopping
     mcsStopped
     mcsError
@@ -41,6 +42,8 @@ type
     mevPublishCompleted
     mevSubscribed
     mevUnsubscribed
+    mevReconnectScheduled
+    mevReconnectAttempt
     mevMessageReceived
     mevError
     mevStopped
@@ -48,9 +51,8 @@ type
   MqttReconnectPolicy* = object
     ## Reconnect configuration carried by connect commands.
     ##
-    ## Step 24 only introduces the type and API plumbing. The worker stores this
-    ## policy for future reconnect handling, but it does not schedule automatic
-    ## reconnects yet.
+    ## Auto reconnect is disabled by default. When enabled, the worker schedules
+    ## reconnect attempts only after unexpected disconnects or network-loop errors.
     enabled*: bool
     initialDelayMs*: int
     maxDelayMs*: int
@@ -106,6 +108,8 @@ type
     flags*: int
     grantedQos*: seq[int]
     pending*: MqttPendingOperations
+    reconnectDelayMs*: int
+    reconnectAttempt*: int
 
 
 # ------------------------------------------------------------------------------
@@ -113,6 +117,9 @@ type
 # ------------------------------------------------------------------------------
 proc isConnected*(state: MqttConnectionState): bool {.inline.} =
   result = state == mcsConnected
+
+proc isConnecting*(state: MqttConnectionState): bool {.inline.} =
+  result = state in {mcsConnecting, mcsReconnecting}
 
 proc isTerminal*(state: MqttConnectionState): bool {.inline.} =
   result = state in {mcsStopped, mcsError}
@@ -161,6 +168,30 @@ proc validateReconnectPolicy*(policy: MqttReconnectPolicy;
     return err(invalidArgument(context, &"multiplier must be >= 1.0: {policy.multiplier}"))
 
   result = ok(MqttOk())
+
+
+proc reconnectDelayMs*(policy: MqttReconnectPolicy; attempt: int): int =
+  ## Return the exponential-backoff delay for a 1-based reconnect attempt.
+  ##
+  ## The policy is assumed to be validated. Invalid/disabled inputs are handled
+  ## defensively so this helper is safe to use in tests and diagnostics.
+  if not policy.enabled or attempt <= 0:
+    return 0
+
+  var delay = policy.initialDelayMs.float
+  if attempt > 1:
+    for _ in 2 .. attempt:
+      delay = delay * policy.multiplier
+      if delay >= policy.maxDelayMs.float:
+        delay = policy.maxDelayMs.float
+        break
+
+  if delay < 0.0:
+    return 0
+  if delay > policy.maxDelayMs.float:
+    delay = policy.maxDelayMs.float
+
+  result = delay.int
 
 proc `$`*(policy: MqttReconnectPolicy): string =
   if policy.enabled:
@@ -341,6 +372,26 @@ proc subscribedEvent*(mid: int; commandId = 0; grantedQos: openArray[int] = []):
 proc unsubscribedEvent*(mid: int; commandId = 0): MqttEvent =
   result = MqttEvent(commandId: commandId, kind: mevUnsubscribed, mid: mid)
 
+proc reconnectScheduledEvent*(delayMs: int; attempt: int; commandId = 0;
+                              detail = ""): MqttEvent =
+  result = MqttEvent(
+    commandId: commandId,
+    kind: mevReconnectScheduled,
+    state: mcsReconnecting,
+    reconnectDelayMs: delayMs,
+    reconnectAttempt: attempt,
+    detail: detail
+  )
+
+proc reconnectAttemptEvent*(attempt: int; commandId = 0; detail = ""): MqttEvent =
+  result = MqttEvent(
+    commandId: commandId,
+    kind: mevReconnectAttempt,
+    state: mcsReconnecting,
+    reconnectAttempt: attempt,
+    detail: detail
+  )
+
 proc messageReceivedEvent*(message: sink MqttMessage; commandId = 0): MqttEvent =
   result = MqttEvent(
     commandId: commandId,
@@ -379,6 +430,10 @@ proc summary*(event: MqttEvent): string =
     result = &"{event.kind}(commandId={event.commandId}, state={event.state}, detail={event.detail})"
   of mevPendingChanged:
     result = &"{event.kind}(commandId={event.commandId}, publishes={event.pending.publishes}, subscribes={event.pending.subscribes}, unsubscribes={event.pending.unsubscribes}, total={event.pending.total})"
+  of mevReconnectScheduled:
+    result = &"{event.kind}(commandId={event.commandId}, attempt={event.reconnectAttempt}, delayMs={event.reconnectDelayMs}, detail={event.detail})"
+  of mevReconnectAttempt:
+    result = &"{event.kind}(commandId={event.commandId}, attempt={event.reconnectAttempt}, detail={event.detail})"
   of mevMessageReceived:
     result = &"{event.kind}(commandId={event.commandId}, topic={event.message.topic}, payloadLen={event.message.payload.len})"
   of mevError:
