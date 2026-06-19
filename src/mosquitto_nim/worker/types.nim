@@ -36,6 +36,7 @@ type
   MqttEventKind* = enum
     mevStateChanged
     mevPendingChanged
+    mevQueueChanged
     mevConnected
     mevDisconnected
     mevPublishAccepted
@@ -61,8 +62,8 @@ type
   MqttOfflineQos0Policy* = enum
     ## Policy for QoS0 publishes while the client is offline/reconnecting.
     ##
-    ## Step 26 only introduces configuration plumbing. Actual queueing behavior is
-    ## intentionally left for a later step.
+    ## QoS0 publishes may be rejected, dropped, or retained while the client is
+    ## offline/reconnecting, depending on this policy.
     moqReject
     moqDropNewest
     moqDropOldest
@@ -72,9 +73,7 @@ type
     ## Offline publish queue configuration carried by connect commands.
     ##
     ## The default is disabled, so existing publish behavior is unchanged. When
-    ## enabled, later worker steps can use maxMessages/maxBytes and qos0Policy to
-    ## decide whether disconnected publishes should be rejected, dropped, or
-    ## queued.
+    ## enabled, maxMessages/maxBytes bound the local offline publish queue.
     enabled*: bool
     maxMessages*: int
     maxBytes*: int
@@ -115,6 +114,18 @@ type
     unsubscribes*: int
     total*: int
 
+  MqttQueueSnapshot* = object
+    ## Snapshot of worker-visible MQTT queues.
+    ##
+    ## pending is the broker-level in-flight snapshot. offlineQueued/offlineBytes
+    ## represent publish commands retained locally while the client is offline or
+    ## reconnecting. The total is intended for compatibility/debug helpers such as
+    ## msgQueue().
+    pending*: MqttPendingOperations
+    offlineQueued*: int
+    offlineBytes*: int
+    total*: int
+
   MqttEvent* = object
     ## Event emitted by the MQTT worker.
     ##
@@ -131,6 +142,7 @@ type
     flags*: int
     grantedQos*: seq[int]
     pending*: MqttPendingOperations
+    queue*: MqttQueueSnapshot
     reconnectDelayMs*: int
     reconnectAttempt*: int
 
@@ -235,11 +247,13 @@ proc noOfflineQueue*(): MqttOfflineQueuePolicy =
   )
 
 proc mqttOfflineQueuePolicy*(maxMessages = 100; maxBytes = 1024 * 1024;
-                             qos0Policy = moqReject): MqttOfflineQueuePolicy =
+                             qos0Policy = moqQueue): MqttOfflineQueuePolicy =
   ## Construct an enabled offline publish queue policy.
   ##
-  ## Validation is performed by validateOfflineQueuePolicy(). Keeping the
-  ## constructor allocation-only lets tests deliberately build invalid values.
+  ## The default queues QoS0 publishes as well, matching the original nmqtt
+  ## workQueue-style behaviour. Validation is performed by
+  ## validateOfflineQueuePolicy(). Keeping the constructor allocation-only lets
+  ## tests deliberately build invalid values.
   result = MqttOfflineQueuePolicy(
     enabled: true,
     maxMessages: maxMessages,
@@ -252,8 +266,7 @@ proc validateOfflineQueuePolicy*(policy: MqttOfflineQueuePolicy;
   ## Validate offline publish queue policy values.
   ##
   ## Disabled policies are accepted regardless of limit fields. Enabled policies
-  ## must be bounded so a future offline queue implementation cannot accidentally
-  ## become unbounded by default.
+  ## must be bounded so disconnected publish queueing cannot become unbounded.
   if not policy.enabled:
     return ok(MqttOk())
 
@@ -286,6 +299,24 @@ proc emptyPendingOperations*(): MqttPendingOperations {.inline.} =
 
 proc isEmpty*(pending: MqttPendingOperations): bool {.inline.} =
   result = pending.total == 0
+
+# ------------------------------------------------------------------------------
+# Queue snapshot helpers
+# ------------------------------------------------------------------------------
+proc queueSnapshot*(pending: MqttPendingOperations = emptyPendingOperations();
+                    offlineQueued = 0; offlineBytes = 0): MqttQueueSnapshot =
+  result = MqttQueueSnapshot(
+    pending: pending,
+    offlineQueued: offlineQueued,
+    offlineBytes: offlineBytes,
+    total: pending.total + offlineQueued
+  )
+
+proc emptyQueueSnapshot*(): MqttQueueSnapshot {.inline.} =
+  result = queueSnapshot()
+
+proc isEmpty*(queue: MqttQueueSnapshot): bool {.inline.} =
+  result = queue.total == 0 and queue.offlineBytes == 0
 
 # ------------------------------------------------------------------------------
 # Payload helpers
@@ -397,7 +428,16 @@ proc pendingChangedEvent*(pending: MqttPendingOperations; commandId = 0): MqttEv
   result = MqttEvent(
     commandId: commandId,
     kind: mevPendingChanged,
-    pending: pending
+    pending: pending,
+    queue: queueSnapshot(pending = pending)
+  )
+
+proc queueChangedEvent*(queue: MqttQueueSnapshot; commandId = 0): MqttEvent =
+  result = MqttEvent(
+    commandId: commandId,
+    kind: mevQueueChanged,
+    pending: queue.pending,
+    queue: queue
   )
 
 proc connectedEvent*(commandId = 0; reasonCode = 0; flags = 0): MqttEvent =
@@ -504,6 +544,8 @@ proc summary*(event: MqttEvent): string =
     result = &"{event.kind}(commandId={event.commandId}, state={event.state}, detail={event.detail})"
   of mevPendingChanged:
     result = &"{event.kind}(commandId={event.commandId}, publishes={event.pending.publishes}, subscribes={event.pending.subscribes}, unsubscribes={event.pending.unsubscribes}, total={event.pending.total})"
+  of mevQueueChanged:
+    result = &"{event.kind}(commandId={event.commandId}, pending={event.queue.pending.total}, offlineQueued={event.queue.offlineQueued}, offlineBytes={event.queue.offlineBytes}, total={event.queue.total})"
   of mevReconnectScheduled:
     result = &"{event.kind}(commandId={event.commandId}, attempt={event.reconnectAttempt}, delayMs={event.reconnectDelayMs}, detail={event.detail})"
   of mevReconnectAttempt:

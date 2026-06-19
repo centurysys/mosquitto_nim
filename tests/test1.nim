@@ -401,6 +401,96 @@ suite "mosquitto_nim worker lifecycle":
       check sawStopped
       check worker.joinMqttWorker().isOk
 
+  test "worker queues disconnected publishes when offline queue is enabled":
+    let workerRes = startMqttWorker("mosquitto_nim_step26b_worker_offline_queue")
+    check workerRes.isOk
+
+    if workerRes.isOk:
+      let worker = workerRes.get()
+      let reconnectPolicy = mqttReconnectPolicy(initialDelayMs = 60000, maxDelayMs = 60000, multiplier = 1.0)
+      let offlinePolicy = mqttOfflineQueuePolicy(maxMessages = 2, maxBytes = 4096, qos0Policy = moqQueue)
+
+      check worker.sendCommand(connectCommand("", reconnectPolicy = reconnectPolicy, offlineQueuePolicy = offlinePolicy, id = 97)).isOk
+      check worker.sendCommand(publishCommand("mosquitto_nim/offline/qos1", "queued", qos1, id = 98)).isOk
+      check worker.requestStop(id = 99).isOk
+
+      var sawConnectError = false
+      var sawQueued = false
+      var sawStopped = false
+      for _ in 0 ..< 200:
+        var event: MqttEvent
+        let recvRes = worker.tryReceiveEvent(event)
+        check recvRes.isOk
+
+        if recvRes.isOk and recvRes.get():
+          case event.kind
+          of mevError:
+            if event.commandId == 97:
+              sawConnectError = true
+              check event.error.kind == meInvalidArgument
+          of mevQueueChanged:
+            if event.commandId == 98 and event.queue.offlineQueued == 1:
+              sawQueued = true
+              check event.queue.offlineBytes > 0
+              check event.queue.total == 1
+          of mevStopped:
+            if event.commandId == 99:
+              sawStopped = true
+          else:
+            discard
+
+          if sawConnectError and sawQueued and sawStopped:
+            break
+
+        sleep(10)
+
+      check sawConnectError
+      check sawQueued
+      check sawStopped
+      check worker.joinMqttWorker().isOk
+
+  test "worker rejects disconnected QoS0 publishes when offline QoS0 policy rejects":
+    let workerRes = startMqttWorker("mosquitto_nim_step26b_worker_offline_qos0_reject")
+    check workerRes.isOk
+
+    if workerRes.isOk:
+      let worker = workerRes.get()
+      let reconnectPolicy = mqttReconnectPolicy(initialDelayMs = 60000, maxDelayMs = 60000, multiplier = 1.0)
+      let offlinePolicy = mqttOfflineQueuePolicy(maxMessages = 2, maxBytes = 4096, qos0Policy = moqReject)
+
+      check worker.sendCommand(connectCommand("", reconnectPolicy = reconnectPolicy, offlineQueuePolicy = offlinePolicy, id = 100)).isOk
+      check worker.sendCommand(publishCommand("mosquitto_nim/offline/qos0", "drop-me", qos0, id = 101)).isOk
+      check worker.requestStop(id = 102).isOk
+
+      var sawPublishError = false
+      var sawStopped = false
+      for _ in 0 ..< 200:
+        var event: MqttEvent
+        let recvRes = worker.tryReceiveEvent(event)
+        check recvRes.isOk
+
+        if recvRes.isOk and recvRes.get():
+          case event.kind
+          of mevError:
+            if event.commandId == 101:
+              sawPublishError = true
+              check event.error.kind == meInvalidState
+              check event.error.message.contains("QoS0")
+          of mevStopped:
+            if event.commandId == 102:
+              sawStopped = true
+          else:
+            discard
+
+          if sawPublishError and sawStopped:
+            break
+
+        sleep(10)
+
+      check sawPublishError
+      check sawStopped
+      check worker.joinMqttWorker().isOk
+
 
 suite "mosquitto_nim highlevel async bridge":
   test "async bridge can await worker stopped event":
@@ -1655,9 +1745,12 @@ suite "mosquitto_nim reconnect policy API":
 
       check client.joinMqttClient().isOk
 
-  test "nmqtt compatibility context stores reconnect policy":
+  test "nmqtt compatibility context defaults to reconnect and stores reconnect policy":
     let ctx = newMqttCtx("mosquitto_nim_step24_reconnect_nmqtt")
-    check not ctx.reconnectPolicy().enabled
+    check ctx.reconnectPolicy().enabled
+    check ctx.reconnectPolicy().initialDelayMs == 1000
+    check ctx.reconnectPolicy().maxDelayMs == 30000
+    check ctx.reconnectPolicy().multiplier == 2.0
     check ctx.enableReconnect(initialDelayMs = 300, maxDelayMs = 9000, multiplier = 3.0).isOk
     check ctx.reconnectPolicy().enabled
     check ctx.reconnectPolicy().initialDelayMs == 300
@@ -1685,6 +1778,12 @@ suite "mosquitto_nim offline queue policy API":
     check disabled.validateOfflineQueuePolicy().isOk
     check ($disabled).contains("enabled=false")
 
+    let defaultEnabled = mqttOfflineQueuePolicy()
+    check defaultEnabled.enabled
+    check defaultEnabled.maxMessages == 100
+    check defaultEnabled.maxBytes == 1024 * 1024
+    check defaultEnabled.qos0Policy == moqQueue
+
     let enabled = mqttOfflineQueuePolicy(maxMessages = 20, maxBytes = 4096, qos0Policy = moqDropOldest)
     check enabled.enabled
     check enabled.maxMessages == 20
@@ -1705,6 +1804,22 @@ suite "mosquitto_nim offline queue policy API":
       maxBytes: 0,
       qos0Policy: moqQueue
     )).isErr
+
+  test "queue snapshots combine pending and offline publish counts":
+    let pending = pendingOperations(publishes = 1, subscribes = 2, unsubscribes = 0)
+    let snapshot = queueSnapshot(pending = pending, offlineQueued = 3, offlineBytes = 128)
+    check snapshot.pending.total == 3
+    check snapshot.offlineQueued == 3
+    check snapshot.offlineBytes == 128
+    check snapshot.total == 6
+    check not snapshot.isEmpty()
+
+    let event = queueChangedEvent(snapshot, commandId = 77)
+    check event.kind == mevQueueChanged
+    check event.commandId == 77
+    check event.queue.total == 6
+    check event.pending.total == 3
+    check event.summary().contains("offlineQueued=3")
 
   test "highlevel client stores offline queue policy for future connect commands":
     let clientRes = startMqttClient("mosquitto_nim_step26_offline_queue_policy", pollMs = 1)
@@ -1751,9 +1866,12 @@ suite "mosquitto_nim offline queue policy API":
 
       check client.joinMqttClient().isOk
 
-  test "nmqtt compatibility context stores offline queue policy":
+  test "nmqtt compatibility context defaults to offline queueing and stores offline queue policy":
     let ctx = newMqttCtx("mosquitto_nim_step26_offline_queue_nmqtt")
-    check not ctx.offlineQueuePolicy().enabled
+    check ctx.offlineQueuePolicy().enabled
+    check ctx.offlineQueuePolicy().maxMessages == 100
+    check ctx.offlineQueuePolicy().maxBytes == 1024 * 1024
+    check ctx.offlineQueuePolicy().qos0Policy == moqQueue
     check ctx.enableOfflineQueue(maxMessages = 30, maxBytes = 16384, qos0Policy = moqDropNewest).isOk
     check ctx.offlineQueuePolicy().enabled
     check ctx.offlineQueuePolicy().maxMessages == 30

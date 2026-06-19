@@ -60,9 +60,23 @@ type
     state: MqttConnectionState
     stopped: bool
     pending: MqttPendingOperations
+    queue: MqttQueueSnapshot
     pendingCount: int
     subscriptions: seq[MqttSubscription]
     lastError: Option[MqttError]
+
+# ------------------------------------------------------------------------------
+# Compatibility defaults
+# ------------------------------------------------------------------------------
+proc defaultNmqttReconnectPolicy(): MqttReconnectPolicy =
+  ## Original nmqtt start() is documented as auto-connect/reconnect.
+  result = mqttReconnectPolicy(initialDelayMs = 1000, maxDelayMs = 30000, multiplier = 2.0)
+
+proc defaultNmqttOfflineQueuePolicy(): MqttOfflineQueuePolicy =
+  ## Original nmqtt keeps publish work in its local workQueue and work() only
+  ## drains it while connected, so nmqtt compatibility defaults to bounded
+  ## offline publish queueing, including QoS0.
+  result = mqttOfflineQueuePolicy(maxMessages = 100, maxBytes = 1024 * 1024, qos0Policy = moqQueue)
 
 # ------------------------------------------------------------------------------
 # Internal helpers
@@ -116,6 +130,7 @@ proc ensureClient(ctx: MqttCtx) =
   ctx.connected = false
   ctx.state = mcsDisconnected
   ctx.pending = emptyPendingOperations()
+  ctx.queue = emptyQueueSnapshot()
   ctx.stopped = false
 
 proc handleCompatEvent(ctx: MqttCtx; event: MqttEvent): Future[void] {.async.} =
@@ -125,6 +140,11 @@ proc handleCompatEvent(ctx: MqttCtx; event: MqttEvent): Future[void] {.async.} =
     ctx.connected = event.state.isConnected()
   of mevPendingChanged:
     ctx.pending = event.pending
+    ctx.queue.pending = event.pending
+    ctx.queue.total = event.pending.total + ctx.queue.offlineQueued
+  of mevQueueChanged:
+    ctx.pending = event.queue.pending
+    ctx.queue = event.queue
   of mevConnected:
     ctx.state = mcsConnected
     ctx.connected = true
@@ -132,6 +152,8 @@ proc handleCompatEvent(ctx: MqttCtx; event: MqttEvent): Future[void] {.async.} =
     ctx.state = mcsDisconnected
     ctx.connected = false
     ctx.pending = emptyPendingOperations()
+    ctx.queue.pending = emptyPendingOperations()
+    ctx.queue.total = ctx.queue.offlineQueued
   of mevReconnectScheduled, mevReconnectAttempt:
     ctx.state = mcsReconnecting
     ctx.connected = false
@@ -141,6 +163,7 @@ proc handleCompatEvent(ctx: MqttCtx; event: MqttEvent): Future[void] {.async.} =
   of mevStopped:
     ctx.state = mcsStopped
     ctx.pending = emptyPendingOperations()
+    ctx.queue = emptyQueueSnapshot()
     ctx.running = false
     ctx.stopped = true
   of mevError:
@@ -197,11 +220,12 @@ proc newMqttCtx*(clientId: string): MqttCtx =
   result.protocolVersion = mpv311
   result.cleanSession = true
   result.sslOn = false
-  result.reconnectPolicy = noReconnect()
-  result.offlineQueuePolicy = noOfflineQueue()
+  result.reconnectPolicy = defaultNmqttReconnectPolicy()
+  result.offlineQueuePolicy = defaultNmqttOfflineQueuePolicy()
   result.connectTimeoutMs = 5000
   result.pumpSleepMs = 1
   result.pending = emptyPendingOperations()
+  result.queue = emptyQueueSnapshot()
   result.pendingCount = 0
   result.subscriptions = @[]
   result.lastError = none(MqttError)
@@ -306,9 +330,8 @@ proc setOfflineQueuePolicy*(ctx: MqttCtx;
                             policy: MqttOfflineQueuePolicy): MqttResult[MqttOk] =
   ## Store offline publish queue policy configuration for future starts/connects.
   ##
-  ## This compatibility API only configures policy. It does not make publish()
-  ## wait for broker acknowledgement and does not enable actual offline queueing
-  ## until the worker queue implementation is added in a later step.
+  ## This compatibility API configures local offline publish queueing. It does not
+  ## make publish() wait for broker acknowledgement.
   if ctx.isNil:
     return err(invalidState("set nmqtt offline queue policy", "context is nil"))
 
@@ -322,7 +345,7 @@ proc setOfflineQueuePolicy*(ctx: MqttCtx;
 
 proc enableOfflineQueue*(ctx: MqttCtx; maxMessages = 100;
                          maxBytes = 1024 * 1024;
-                         qos0Policy = moqReject): MqttResult[MqttOk] =
+                         qos0Policy = moqQueue): MqttResult[MqttOk] =
   result = ctx.setOfflineQueuePolicy(
     mqttOfflineQueuePolicy(
       maxMessages = maxMessages,
@@ -390,9 +413,9 @@ proc connect*(ctx: MqttCtx) {.async.} =
 proc start*(ctx: MqttCtx) {.async.} =
   ## Connect and start the asyncdispatch-side compatibility event pump.
   ##
-  ## This is the nmqtt-style entry point.  When reconnect policy is enabled, the
-  ## worker may continue reconnect attempts after unexpected disconnects while
-  ## the compatibility event pump remains active.
+  ## This is the nmqtt-style entry point.  Reconnect and bounded offline
+  ## publish queueing are enabled by default to match original nmqtt behaviour
+  ## on unstable links. Explicit disconnect/stop still stops the worker.
   ctx.requireCtx("start MQTT client")
   if ctx.running:
     return
@@ -434,6 +457,7 @@ proc disconnect*(ctx: MqttCtx) {.async.} =
   ctx.connected = false
   ctx.started = false
   ctx.pending = emptyPendingOperations()
+  ctx.queue = emptyQueueSnapshot()
   ctx.pendingCount = 0
   ctx.client = nil
   ctx.subscriptions.setLen(0)
@@ -532,7 +556,13 @@ proc pendingOperations*(ctx: MqttCtx): MqttPendingOperations =
     return emptyPendingOperations()
   result = ctx.pending
 
+proc queueSnapshot*(ctx: MqttCtx): MqttQueueSnapshot =
+  ## Return the latest worker-visible queue snapshot.
+  if ctx.isNil:
+    return emptyQueueSnapshot()
+  result = ctx.queue
+
 proc msgQueue*(ctx: MqttCtx): int =
   if ctx.isNil:
     return 0
-  result = max(ctx.pendingCount, ctx.pending.total)
+  result = max(ctx.pendingCount, ctx.queue.total)

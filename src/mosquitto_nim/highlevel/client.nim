@@ -43,6 +43,7 @@ type
     nextCommandId: int
     state: MqttConnectionState
     pending: MqttPendingOperations
+    queue: MqttQueueSnapshot
     reconnectPolicy: MqttReconnectPolicy
     offlineQueuePolicy: MqttOfflineQueuePolicy
     closed: bool
@@ -62,6 +63,19 @@ proc ensureOpen(client: MqttClient; context: string): MqttResult[MqttOk] =
 
   result = ok(MqttOk())
 
+proc updatePendingSnapshot(client: MqttClient; pending: MqttPendingOperations) =
+  if client.isNil:
+    return
+  client.pending = pending
+  client.queue.pending = pending
+  client.queue.total = pending.total + client.queue.offlineQueued
+
+proc clearQueueSnapshots(client: MqttClient) =
+  if client.isNil:
+    return
+  client.pending = emptyPendingOperations()
+  client.queue = emptyQueueSnapshot()
+
 proc updateStateFromEvent(client: MqttClient; event: MqttEvent) =
   if client.isNil:
     return
@@ -70,17 +84,20 @@ proc updateStateFromEvent(client: MqttClient; event: MqttEvent) =
   of mevStateChanged:
     client.state = event.state
   of mevPendingChanged:
-    client.pending = event.pending
+    client.updatePendingSnapshot(event.pending)
+  of mevQueueChanged:
+    client.pending = event.queue.pending
+    client.queue = event.queue
   of mevConnected:
     client.state = mcsConnected
   of mevDisconnected:
     client.state = mcsDisconnected
-    client.pending = emptyPendingOperations()
+    client.updatePendingSnapshot(emptyPendingOperations())
   of mevReconnectScheduled, mevReconnectAttempt:
     client.state = mcsReconnecting
   of mevStopped:
     client.state = mcsStopped
-    client.pending = emptyPendingOperations()
+    client.clearQueueSnapshots()
   else:
     discard
 
@@ -148,6 +165,7 @@ proc startMqttClient*(clientId = ""; cleanSession = true;
   client.nextCommandId = 0
   client.state = mcsDisconnected
   client.pending = emptyPendingOperations()
+  client.queue = emptyQueueSnapshot()
   client.reconnectPolicy = noReconnect()
   client.offlineQueuePolicy = noOfflineQueue()
   client.closed = false
@@ -183,9 +201,20 @@ proc pendingTotal*(client: MqttClient): int {.inline.} =
     return 0
   result = client.pending.total
 
+proc queueSnapshot*(client: MqttClient): MqttQueueSnapshot {.inline.} =
+  ## Return the latest worker-visible queue snapshot.
+  ##
+  ## This includes broker-level pending operations plus local offline publishes
+  ## retained by the worker while disconnected/reconnecting.
+  if client.isNil:
+    return emptyQueueSnapshot()
+  result = client.queue
+
 proc msgQueue*(client: MqttClient): int {.inline.} =
-  ## Compatibility/debug helper returning the latest pending operation total.
-  result = client.pendingTotal()
+  ## Compatibility/debug helper returning the latest worker-visible queue total.
+  if client.isNil:
+    return 0
+  result = client.queue.total
 
 proc reconnectPolicy*(client: MqttClient): MqttReconnectPolicy {.inline.} =
   ## Return the reconnect policy that will be attached to future connect commands.
@@ -235,9 +264,8 @@ proc setOfflineQueuePolicy*(client: MqttClient;
                             policy: MqttOfflineQueuePolicy): MqttResult[MqttOk] =
   ## Store an offline publish queue policy for future connect commands.
   ##
-  ## Step 26 only wires the policy through the public API and worker connect
-  ## configuration. Actual disconnected publish queueing remains disabled until
-  ## a later implementation step.
+  ## The worker uses this policy after a connect command has carried it across
+  ## the thread boundary. Disabled policy preserves the original reject behavior.
   let openRes = client.ensureOpen("set MQTT offline queue policy")
   if openRes.isErr:
     return err(openRes.error)
@@ -251,7 +279,7 @@ proc setOfflineQueuePolicy*(client: MqttClient;
 
 proc enableOfflineQueue*(client: MqttClient; maxMessages = 100;
                          maxBytes = 1024 * 1024;
-                         qos0Policy = moqReject): MqttResult[MqttOk] =
+                         qos0Policy = moqQueue): MqttResult[MqttOk] =
   result = client.setOfflineQueuePolicy(
     mqttOfflineQueuePolicy(
       maxMessages = maxMessages,
@@ -281,7 +309,7 @@ proc joinMqttClient*(client: MqttClient): MqttResult[MqttOk] =
       return err(joinRes.error)
 
   client.closed = true
-  client.pending = emptyPendingOperations()
+  client.clearQueueSnapshots()
   if client.state != mcsError:
     client.state = mcsStopped
   result = ok(MqttOk())

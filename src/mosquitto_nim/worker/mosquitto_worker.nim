@@ -52,6 +52,10 @@ type
     explicitDisconnectRequested: bool
     reconnectApiAvailable: bool
 
+  OfflinePublishItem = object
+    command: MqttCommand
+    bytes: int
+
 # ------------------------------------------------------------------------------
 # Internal helpers
 # ------------------------------------------------------------------------------
@@ -102,6 +106,34 @@ proc sendWorkerPending(eventQueue: ThreadQueue[MqttEvent];
     eventQueue,
     pendingChangedEvent(
       currentPendingOperations(pendingPublishes, pendingSubscribes, pendingUnsubscribes),
+      commandId = commandId
+    )
+  )
+
+proc offlineQueueBytes(offlineQueue: seq[OfflinePublishItem]): int {.raises: [].} =
+  for item in offlineQueue:
+    result += item.bytes
+
+proc currentQueueSnapshot(pendingPublishes: Table[int, int];
+                          pendingSubscribes: Table[int, int];
+                          pendingUnsubscribes: Table[int, int];
+                          offlineQueue: seq[OfflinePublishItem]): MqttQueueSnapshot =
+  result = queueSnapshot(
+    pending = currentPendingOperations(pendingPublishes, pendingSubscribes, pendingUnsubscribes),
+    offlineQueued = offlineQueue.len,
+    offlineBytes = offlineQueue.offlineQueueBytes()
+  )
+
+proc sendWorkerQueue(eventQueue: ThreadQueue[MqttEvent];
+                     pendingPublishes: Table[int, int];
+                     pendingSubscribes: Table[int, int];
+                     pendingUnsubscribes: Table[int, int];
+                     offlineQueue: seq[OfflinePublishItem];
+                     commandId = 0) {.raises: [].} =
+  sendWorkerEvent(
+    eventQueue,
+    queueChangedEvent(
+      currentQueueSnapshot(pendingPublishes, pendingSubscribes, pendingUnsubscribes, offlineQueue),
       commandId = commandId
     )
   )
@@ -181,6 +213,159 @@ proc applyConnectConfig(client: LowLevelClient; cmd: MqttCommand): MqttResult[Mq
 
   result = ok(MqttOk())
 
+proc publishCommandBytes(cmd: MqttCommand): int {.raises: [].} =
+  ## Approximate the memory retained by an offline publish command.
+  ##
+  ## This is intentionally conservative and Nim-owned. It is used only for the
+  ## offline queue limit; libmosquitto packet encoding overhead is not included.
+  result = cmd.topic.len + cmd.payload.len
+  for property in cmd.properties:
+    result += property.name.len
+    result += property.value.len
+    result += property.data.len
+    result += 8
+
+proc offlineQueueFits(policy: MqttOfflineQueuePolicy;
+                      offlineQueue: seq[OfflinePublishItem];
+                      bytes: int): bool {.raises: [].} =
+  result = offlineQueue.len < policy.maxMessages and
+           offlineQueue.offlineQueueBytes() + bytes <= policy.maxBytes
+
+proc dropOldestQos0(offlineQueue: var seq[OfflinePublishItem];
+                    eventQueue: ThreadQueue[MqttEvent]): bool {.raises: [].} =
+  ## Drop one queued QoS0 publish and report that command as an error event.
+  for i in 0 ..< offlineQueue.len:
+    if offlineQueue[i].command.qos == qos0:
+      let droppedCommandId = offlineQueue[i].command.id
+      offlineQueue.delete(i)
+      sendWorkerError(
+        eventQueue,
+        invalidState("MQTT offline publish queue", "queued QoS0 publish was dropped by policy"),
+        droppedCommandId
+      )
+      return true
+  result = false
+
+proc sendPublishNow(command: sink MqttCommand;
+                    client: LowLevelClient;
+                    eventQueue: ThreadQueue[MqttEvent];
+                    pendingPublishes: var Table[int, int];
+                    pendingSubscribes: Table[int, int];
+                    pendingUnsubscribes: Table[int, int]): bool {.raises: [].} =
+  ## Submit a publish command to libmosquitto immediately.
+  var cmd = command
+  let publishRes = if cmd.properties.len > 0:
+      publishLowLevelClientV5(
+        client,
+        cmd.topic,
+        cmd.payload,
+        cmd.qos,
+        cmd.retain,
+        cmd.properties
+      )
+    else:
+      publishLowLevelClient(client, cmd.topic, cmd.payload, cmd.qos, cmd.retain)
+
+  if publishRes.isErr:
+    sendWorkerError(eventQueue, publishRes.error, cmd.id)
+    return false
+
+  let mid = publishRes.get()
+  if mid != 0:
+    pendingPublishes[mid] = cmd.id
+    sendWorkerPending(eventQueue, pendingPublishes, pendingSubscribes, pendingUnsubscribes, commandId = cmd.id)
+  sendWorkerEvent(eventQueue, publishAcceptedEvent(mid, commandId = cmd.id))
+  result = true
+
+proc enqueueOfflinePublish(command: sink MqttCommand;
+                           policy: MqttOfflineQueuePolicy;
+                           offlineQueue: var seq[OfflinePublishItem];
+                           eventQueue: ThreadQueue[MqttEvent];
+                           pendingPublishes: Table[int, int];
+                           pendingSubscribes: Table[int, int];
+                           pendingUnsubscribes: Table[int, int]) {.raises: [].} =
+  ## Queue a disconnected publish according to the offline queue policy.
+  var cmd = command
+  if not policy.enabled:
+    sendWorkerError(eventQueue, invalidState("MQTT worker publish", "client is not connected"), cmd.id)
+    return
+
+  if cmd.qos == qos0 and policy.qos0Policy == moqReject:
+    sendWorkerError(
+      eventQueue,
+      invalidState("MQTT offline publish queue", "offline QoS0 publish is rejected by policy"),
+      cmd.id
+    )
+    return
+
+  let bytes = publishCommandBytes(cmd)
+  if cmd.qos == qos0 and policy.qos0Policy == moqDropNewest and
+      not policy.offlineQueueFits(offlineQueue, bytes):
+    sendWorkerError(
+      eventQueue,
+      invalidState("MQTT offline publish queue", "offline QoS0 publish was dropped by policy"),
+      cmd.id
+    )
+    return
+
+  while not policy.offlineQueueFits(offlineQueue, bytes):
+    if policy.qos0Policy == moqDropOldest and offlineQueue.dropOldestQos0(eventQueue):
+      sendWorkerQueue(
+        eventQueue,
+        pendingPublishes,
+        pendingSubscribes,
+        pendingUnsubscribes,
+        offlineQueue,
+        commandId = cmd.id
+      )
+    else:
+      sendWorkerError(
+        eventQueue,
+        invalidState("MQTT offline publish queue", "offline queue limits would be exceeded"),
+        cmd.id
+      )
+      return
+
+  offlineQueue.add(OfflinePublishItem(command: cmd, bytes: bytes))
+  sendWorkerQueue(
+    eventQueue,
+    pendingPublishes,
+    pendingSubscribes,
+    pendingUnsubscribes,
+    offlineQueue,
+    commandId = cmd.id
+  )
+
+proc flushOfflinePublishes(offlineQueue: var seq[OfflinePublishItem];
+                           loopActive: var bool;
+                           client: LowLevelClient;
+                           eventQueue: ThreadQueue[MqttEvent];
+                           pendingPublishes: var Table[int, int];
+                           pendingSubscribes: Table[int, int];
+                           pendingUnsubscribes: Table[int, int]) {.raises: [].} =
+  ## Submit queued offline publishes after a successful connection.
+  while loopActive and offlineQueue.len > 0:
+    var cmd = offlineQueue[0].command
+    let commandId = cmd.id
+    offlineQueue.delete(0)
+    sendWorkerQueue(
+      eventQueue,
+      pendingPublishes,
+      pendingSubscribes,
+      pendingUnsubscribes,
+      offlineQueue,
+      commandId = commandId
+    )
+
+    discard sendPublishNow(
+      move cmd,
+      client,
+      eventQueue,
+      pendingPublishes,
+      pendingSubscribes,
+      pendingUnsubscribes
+    )
+
 proc startStoredReconnect(reconnect: var WorkerReconnectState;
                           pendingConnectId: var int;
                           loopActive: var bool;
@@ -243,6 +428,7 @@ proc handleCommand(command: sink MqttCommand; running: var bool;
                    loopActive: var bool; pendingConnectId: var int;
                    pendingDisconnectId: var int;
                    reconnect: var WorkerReconnectState;
+                   offlineQueue: var seq[OfflinePublishItem];
                    pendingPublishes: var Table[int, int];
                    pendingSubscribes: var Table[int, int];
                    pendingUnsubscribes: var Table[int, int];
@@ -265,7 +451,9 @@ proc handleCommand(command: sink MqttCommand; running: var bool;
       flushLoop(client, eventQueue, loopActive, loopTimeoutMs, rounds = 2)
       loopActive = false
     clearPendingOperations(pendingPublishes, pendingSubscribes, pendingUnsubscribes)
+    offlineQueue.setLen(0)
     sendWorkerPending(eventQueue, pendingPublishes, pendingSubscribes, pendingUnsubscribes, commandId = cmd.id)
+    sendWorkerQueue(eventQueue, pendingPublishes, pendingSubscribes, pendingUnsubscribes, offlineQueue, commandId = cmd.id)
     running = false
     sendWorkerState(eventQueue, mcsStopped, commandId = cmd.id, detail = "worker stopped")
     sendWorkerEvent(eventQueue, stoppedEvent(commandId = cmd.id))
@@ -322,6 +510,9 @@ proc handleCommand(command: sink MqttCommand; running: var bool;
   of mckDisconnect:
     reconnect.explicitDisconnectRequested = true
     reconnect.cancelReconnect()
+    if offlineQueue.len > 0:
+      offlineQueue.setLen(0)
+      sendWorkerQueue(eventQueue, pendingPublishes, pendingSubscribes, pendingUnsubscribes, offlineQueue, commandId = cmd.id)
     if not loopActive:
       sendWorkerState(eventQueue, mcsDisconnected, commandId = cmd.id, detail = "already disconnected")
       sendWorkerEvent(eventQueue, disconnectedEvent(commandId = cmd.id, detail = "already disconnected"))
@@ -340,29 +531,25 @@ proc handleCommand(command: sink MqttCommand; running: var bool;
 
   of mckPublish:
     if not loopActive:
-      sendWorkerError(eventQueue, invalidState("MQTT worker publish", "client is not connected"), cmd.id)
+      enqueueOfflinePublish(
+        move cmd,
+        reconnect.offlineQueuePolicy,
+        offlineQueue,
+        eventQueue,
+        pendingPublishes,
+        pendingSubscribes,
+        pendingUnsubscribes
+      )
       return
 
-    let publishRes = if cmd.properties.len > 0:
-        publishLowLevelClientV5(
-          client,
-          cmd.topic,
-          cmd.payload,
-          cmd.qos,
-          cmd.retain,
-          cmd.properties
-        )
-      else:
-        publishLowLevelClient(client, cmd.topic, cmd.payload, cmd.qos, cmd.retain)
-    if publishRes.isErr:
-      sendWorkerError(eventQueue, publishRes.error, cmd.id)
-      return
-
-    let mid = publishRes.get()
-    if mid != 0:
-      pendingPublishes[mid] = cmd.id
-      sendWorkerPending(eventQueue, pendingPublishes, pendingSubscribes, pendingUnsubscribes, commandId = cmd.id)
-    sendWorkerEvent(eventQueue, publishAcceptedEvent(mid, commandId = cmd.id))
+    discard sendPublishNow(
+      move cmd,
+      client,
+      eventQueue,
+      pendingPublishes,
+      pendingSubscribes,
+      pendingUnsubscribes
+    )
 
   of mckSubscribe:
     if not loopActive:
@@ -426,6 +613,7 @@ proc workerMain(args: MqttWorkerArgs) {.thread.} =
   var pendingPublishes = initTable[int, int]()
   var pendingSubscribes = initTable[int, int]()
   var pendingUnsubscribes = initTable[int, int]()
+  var offlineQueue: seq[OfflinePublishItem] = @[]
 
   let messageSink: MessageSink = proc(message: MqttMessage) =
     var msg = message
@@ -446,6 +634,15 @@ proc workerMain(args: MqttWorkerArgs) {.thread.} =
           args.eventQueue,
           connectedEvent(commandId = commandId, reasonCode = event.reasonCode, flags = event.flags)
         )
+        flushOfflinePublishes(
+          offlineQueue,
+          loopActive,
+          client,
+          args.eventQueue,
+          pendingPublishes,
+          pendingSubscribes,
+          pendingUnsubscribes
+        )
       else:
         loopActive = false
         sendWorkerState(args.eventQueue, mcsError, commandId = commandId, detail = "connect rejected")
@@ -459,6 +656,7 @@ proc workerMain(args: MqttWorkerArgs) {.thread.} =
       loopActive = false
       clearPendingOperations(pendingPublishes, pendingSubscribes, pendingUnsubscribes)
       sendWorkerPending(args.eventQueue, pendingPublishes, pendingSubscribes, pendingUnsubscribes, commandId = commandId)
+      sendWorkerQueue(args.eventQueue, pendingPublishes, pendingSubscribes, pendingUnsubscribes, offlineQueue, commandId = commandId)
       sendWorkerState(args.eventQueue, mcsDisconnected, commandId = commandId, detail = "disconnect callback")
       sendWorkerEvent(
         args.eventQueue,
@@ -520,6 +718,7 @@ proc workerMain(args: MqttWorkerArgs) {.thread.} =
         pendingConnectId,
         pendingDisconnectId,
         reconnect,
+        offlineQueue,
         pendingPublishes,
         pendingSubscribes,
         pendingUnsubscribes,
@@ -535,6 +734,7 @@ proc workerMain(args: MqttWorkerArgs) {.thread.} =
           pendingConnectId = 0
           clearPendingOperations(pendingPublishes, pendingSubscribes, pendingUnsubscribes)
           sendWorkerPending(args.eventQueue, pendingPublishes, pendingSubscribes, pendingUnsubscribes)
+          sendWorkerQueue(args.eventQueue, pendingPublishes, pendingSubscribes, pendingUnsubscribes, offlineQueue)
           sendWorkerError(args.eventQueue, loopRes.error)
           if not scheduleReconnect(reconnect, args.eventQueue, detail = "mosquitto loop error"):
             sendWorkerState(args.eventQueue, mcsError, detail = "mosquitto loop error")
@@ -554,6 +754,7 @@ proc workerMain(args: MqttWorkerArgs) {.thread.} =
     loopActive = false
 
   clearPendingOperations(pendingPublishes, pendingSubscribes, pendingUnsubscribes)
+  offlineQueue.setLen(0)
 
   if running:
     sendWorkerState(args.eventQueue, mcsStopped, commandId = stopCommandId, detail = "worker stopped after loop exit")
