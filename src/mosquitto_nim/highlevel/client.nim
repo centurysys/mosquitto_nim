@@ -544,6 +544,25 @@ proc subscribe*(client: MqttClient; topicFilter: string; qos = qos0): MqttResult
   var cmd = subscribeCommand(topicFilter, qos = qos)
   result = client.sendClientCommand(move cmd, "subscribe MQTT topic")
 
+proc subscribeV5*(client: MqttClient; topicFilter: string;
+                  properties: MqttSubscribeProperties;
+                  qos = qos0): MqttResult[int] =
+  ## Queue a SUBSCRIBE command with typed MQTT v5 SUBSCRIBE properties.
+  ##
+  ## Success means the command was accepted into the worker queue. It does not
+  ## wait for SUBACK. Watch mevSubscribed with the returned command id when broker
+  ## acknowledgement matters.
+  var cmd = subscribeV5Command(topicFilter, properties = properties, qos = qos)
+  result = client.sendClientCommand(move cmd, "subscribe MQTT v5 topic")
+
+proc subscribeV5*(client: MqttClient; topicFilter: string; qos = qos0;
+                  properties: MqttProperties = @[]): MqttResult[int] =
+  ## Queue a SUBSCRIBE command with generic MQTT v5 SUBSCRIBE properties.
+  ##
+  ## New code should prefer the typed MqttSubscribeProperties overload.
+  var cmd = subscribeV5Command(topicFilter, qos = qos, properties = properties)
+  result = client.sendClientCommand(move cmd, "subscribe MQTT v5 topic")
+
 proc subscribe*(client: MqttClient; topicFilter: string; qos: MqttQos;
                 handler: MqttMessageHandler): MqttResult[MqttSubscription] =
   ## Register a sync handler and queue a broker SUBSCRIBE command.
@@ -567,6 +586,25 @@ proc subscribe*(client: MqttClient; topicFilter: string; qos: MqttQos;
     topicFilter: topicFilter
   ))
 
+proc subscribeV5*(client: MqttClient; topicFilter: string;
+                  properties: MqttSubscribeProperties; qos: MqttQos;
+                  handler: MqttMessageHandler): MqttResult[MqttSubscription] =
+  ## Register a sync handler and queue an MQTT v5 broker SUBSCRIBE command.
+  let handlerRes = client.addMessageHandler(topicFilter, handler)
+  if handlerRes.isErr:
+    return err(handlerRes.error)
+
+  let commandRes = client.subscribeV5(topicFilter, properties = properties, qos = qos)
+  if commandRes.isErr:
+    discard client.removeMessageHandler(handlerRes.get())
+    return err(commandRes.error)
+
+  result = ok(MqttSubscription(
+    commandId: commandRes.get(),
+    handlerId: handlerRes.get(),
+    topicFilter: topicFilter
+  ))
+
 proc subscribe*(client: MqttClient; topicFilter: string; qos: MqttQos;
                 handler: MqttAsyncMessageHandler): MqttResult[MqttSubscription] =
   ## Register an async handler and queue a broker SUBSCRIBE command.
@@ -577,6 +615,25 @@ proc subscribe*(client: MqttClient; topicFilter: string; qos: MqttQos;
     return err(handlerRes.error)
 
   let commandRes = client.subscribe(topicFilter, qos = qos)
+  if commandRes.isErr:
+    discard client.removeMessageHandler(handlerRes.get())
+    return err(commandRes.error)
+
+  result = ok(MqttSubscription(
+    commandId: commandRes.get(),
+    handlerId: handlerRes.get(),
+    topicFilter: topicFilter
+  ))
+
+proc subscribeV5*(client: MqttClient; topicFilter: string;
+                  properties: MqttSubscribeProperties; qos: MqttQos;
+                  handler: MqttAsyncMessageHandler): MqttResult[MqttSubscription] =
+  ## Register an async handler and queue an MQTT v5 broker SUBSCRIBE command.
+  let handlerRes = client.addMessageHandler(topicFilter, handler)
+  if handlerRes.isErr:
+    return err(handlerRes.error)
+
+  let commandRes = client.subscribeV5(topicFilter, properties = properties, qos = qos)
   if commandRes.isErr:
     discard client.removeMessageHandler(handlerRes.get())
     return err(commandRes.error)

@@ -132,7 +132,11 @@ proc main() {.async.} =
 
   await ctx.start()
 
-  await ctx.subscribe("demo/v5", 0) do (topic, message: string):
+  var subProps = noSubscribeProperties()
+  subProps.setSubscriptionIdentifier(1)
+  subProps.addUserProperty("route", "demo")
+
+  await ctx.subscribeV5("demo/v5", subProps, 0) do (topic, message: string):
     echo topic, ": ", message
 
   await ctx.publishV5(
@@ -175,6 +179,7 @@ waitFor main()
 - `publish(topic, message, qos = 0, retain = false)`
 - `publishV5(...)` 独自拡張API
 - `subscribe(topic, qos, callback)`
+- `subscribeV5(...)` 独自拡張API
 - `unsubscribe(topic)`
 - `isConnected()`
 - `msgQueue()`
@@ -183,8 +188,7 @@ waitFor main()
 
 - nmqtt API完全互換
 - MQTT v5 properties の全対応
-- reconnect policy
-- offline publish queue policy
+- reconnect / offline queue の詳細な edge-case 対応
 - TLS broker 実接続テスト
 - WebSocket / WSS 対応
 

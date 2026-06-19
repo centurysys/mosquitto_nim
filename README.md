@@ -138,7 +138,11 @@ proc main() {.async.} =
 
   await ctx.start()
 
-  await ctx.subscribe("demo/v5", 0) do (topic, message: string):
+  var subProps = noSubscribeProperties()
+  subProps.setSubscriptionIdentifier(1)
+  subProps.addUserProperty("route", "demo")
+
+  await ctx.subscribeV5("demo/v5", subProps, 0) do (topic, message: string):
     echo topic, ": ", message
 
   await ctx.publishV5(
@@ -183,6 +187,7 @@ Currently supported in the compatibility facade:
 - `publish(topic, message, qos = 0, retain = false)`
 - `publishV5(...)` as an extension API
 - `subscribe(topic, qos, callback)`
+- `subscribeV5(...)` as an extension API
 - `unsubscribe(topic)`
 - `isConnected()`
 - `msgQueue()`
@@ -191,8 +196,7 @@ Not yet complete:
 
 - Full nmqtt API parity
 - Full MQTT v5 property coverage
-- Reconnect policy
-- Offline publish queue policy
+- Advanced reconnect/offline-queue edge-case coverage
 - TLS integration tests against an actual TLS broker
 - WebSocket / WSS support
 

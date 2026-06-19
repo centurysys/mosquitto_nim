@@ -674,6 +674,41 @@ proc subscribeLowLevelClient*(client: LowLevelClient; topicFilter: string;
 
   result = ok(mid.int)
 
+proc subscribeLowLevelClientV5*(client: LowLevelClient; topicFilter: string;
+                                qos = qos0;
+                                properties: MqttSubscribeProperties = MqttSubscribeProperties()): MqttResult[int] =
+  ## Queue an MQTT v5 SUBSCRIBE packet with optional SUBSCRIBE properties and
+  ## return the libmosquitto message id.
+  let rawRes = requireOpen(client, "mosquitto_subscribe_v5")
+  if rawRes.isErr:
+    return err(rawRes.error)
+
+  let topicRes = validateSubscribeTopic(topicFilter)
+  if topicRes.isErr:
+    return err(topicRes.error)
+
+  let propsRes = buildMosquittoSubscribeProperties(properties)
+  if propsRes.isErr:
+    return err(propsRes.error)
+
+  var rawProps = propsRes.get()
+  var mid: cint
+  let rc = mosquitto_subscribe_v5(
+    rawRes.get(),
+    addr mid,
+    topicFilter.cstring,
+    qos.toInt().cint,
+    0.cint,
+    rawProps
+  )
+  freeMosquittoProperties(rawProps)
+
+  let rcRes = checkMosq(rc, "mosquitto_subscribe_v5")
+  if rcRes.isErr:
+    return err(rcRes.error)
+
+  result = ok(mid.int)
+
 proc unsubscribeLowLevelClient*(client: LowLevelClient; topicFilter: string): MqttResult[int] =
   ## Queue an UNSUBSCRIBE packet and return the libmosquitto message id.
   let rawRes = requireOpen(client, "mosquitto_unsubscribe")

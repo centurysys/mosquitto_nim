@@ -86,6 +86,14 @@ Currently supported for PUBLISH:
 - `payloadFormatIndicatorUtf8()`
 - `payloadFormatIndicatorUnspecified()`
 
+Currently supported for SUBSCRIBE:
+
+- `MqttSubscribeProperties`
+- `setSubscriptionIdentifier(identifier)`
+- `addUserProperty(name, value)`
+
+Incoming PUBLISH messages may also carry `subscriptionIdentifier(identifier)` when the broker includes Subscription Identifier in the message.
+
 Currently copied from MQTT v5 CONNACK/control callbacks when libmosquitto provides them:
 
 - `assignedClientIdentifier(clientId)`
@@ -99,7 +107,7 @@ Currently copied from MQTT v5 CONNACK/control callbacks when libmosquitto provid
 
 These control properties are exposed on `MqttEvent.properties` for `mevConnected`, `mevDisconnected`, `mevPublishCompleted`, `mevSubscribed`, `mevUnsubscribed`, and connect-rejection `mevError` events. Highlevel and nmqtt-compatible clients also keep `lastConnectReasonCode()` and `lastConnectProperties()` for the most recent CONNACK-related data.
 
-For new PUBLISH code, convert publish helpers to `MqttPublishProperties` with `mqttPublishProperties(...)` and pass the typed container to `publishV5()`. The older `MqttProperties` overload remains available for compatibility.
+For new PUBLISH code, convert publish helpers to `MqttPublishProperties` with `mqttPublishProperties(...)` and pass the typed container to `publishV5()`. For new SUBSCRIBE code, use `MqttSubscribeProperties` and `subscribeV5()`. The older generic `MqttProperties` publish/subscribe overloads remain available for compatibility.
 
 Typed containers added for API separation:
 
@@ -107,7 +115,7 @@ Typed containers added for API separation:
 - `MqttPublishProperties`
 - `MqttSubscribeProperties`
 
-`MqttConnectProperties` is wired into MQTT v5 CONNECT. `MqttPublishProperties` is wired into publish APIs. `MqttSubscribeProperties` is reserved for the next subscribe-property step.
+`MqttConnectProperties` is wired into MQTT v5 CONNECT. `MqttPublishProperties` is wired into publish APIs. `MqttSubscribeProperties` is wired into `subscribeV5()` APIs.
 
 ## 2. Worker API
 
@@ -184,6 +192,7 @@ Main operations:
 - `publish(...)`
 - `publishV5(...)`
 - `subscribe(...)`
+- `subscribeV5(...)`
 - `unsubscribe(...)`
 - `nextEvent(...)`
 - `drainEvents(...)`
@@ -272,7 +281,7 @@ subscribe/unsubscribe acknowledgements.
 
 ### Extension API
 
-`setConnectProperties()` configures MQTT v5 CONNECT metadata, and `publishV5()` sends MQTT v5 PUBLISH metadata.
+`setConnectProperties()` configures MQTT v5 CONNECT metadata, `publishV5()` sends MQTT v5 PUBLISH metadata, and `subscribeV5()` sends MQTT v5 SUBSCRIBE metadata.
 
 CONNECT example:
 
@@ -283,6 +292,17 @@ connectProps.setReceiveMaximum(16'u16)
 connectProps.setRequestProblemInformation(true)
 discard ctx.setConnectProperties(connectProps)
 ctx.setProtocolVersion(mpv5)
+```
+
+SUBSCRIBE example:
+
+```nim
+var subProps = noSubscribeProperties()
+subProps.setSubscriptionIdentifier(7)
+subProps.addUserProperty("route", "telemetry")
+
+await ctx.subscribeV5("telemetry/#", subProps, 1) do (topic, message: string):
+  echo topic, ": ", message
 ```
 
 PUBLISH example:

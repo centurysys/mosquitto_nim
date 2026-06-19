@@ -591,6 +591,27 @@ proc subscribe*(ctx: MqttCtx; topic: string; qos: int;
   ctx.subscriptions.add(subRes.get())
   inc ctx.pendingCount
 
+proc subscribeV5*(ctx: MqttCtx; topic: string; properties: MqttSubscribeProperties;
+                  qos: int; callback: PubCallback): Future[void] {.async.} =
+  ## Subscribe with typed MQTT v5 SUBSCRIBE properties through the compatibility
+  ## facade. This is an extension API, not part of the original nmqtt surface.
+  ctx.requireCtx("subscribe MQTT v5 topic")
+  if callback.isNil:
+    ctx.raiseCompat(invalidArgument("subscribe MQTT v5 topic", "callback is nil"))
+  if not ctx.started or ctx.client.isNil:
+    await ctx.start()
+
+  let mqttQos = ctx.qosFromInt(qos, "subscribe MQTT v5 topic")
+  let handler: MqttMessageHandler = proc(message: MqttMessage) =
+    callback(message.topic, message.payloadString())
+
+  let subRes = ctx.client.subscribeV5(topic, properties = properties, qos = mqttQos, handler = handler)
+  if subRes.isErr:
+    ctx.raiseCompat(subRes.error)
+
+  ctx.subscriptions.add(subRes.get())
+  inc ctx.pendingCount
+
 proc unsubscribe*(ctx: MqttCtx; topic: string): Future[void] {.async.} =
   ctx.requireCtx("unsubscribe MQTT topic")
   if ctx.client.isNil:

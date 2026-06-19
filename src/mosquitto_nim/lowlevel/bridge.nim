@@ -40,6 +40,8 @@ const
     ## MQTT v5 Response Topic identifier (0x08).
   MqttPropCorrelationDataId* = 9
     ## MQTT v5 Correlation Data identifier (0x09).
+  MqttPropSubscriptionIdentifierId* = 11
+    ## MQTT v5 Subscription Identifier identifier (0x0B).
   MqttPropSessionExpiryIntervalId* = 17
     ## MQTT v5 Session Expiry Interval identifier (0x11).
   MqttPropAssignedClientIdentifierId* = 18
@@ -189,6 +191,30 @@ proc copyInt32Property(properties: ptr mosquitto_property; identifier: cint;
 
   result = ok(MqttOk())
 
+proc copyVarintProperty(properties: ptr mosquitto_property; identifier: cint;
+                        makeProperty: proc(value: int): MqttProperty;
+                        context: string;
+                        copied: var MqttProperties): MqttResult[MqttOk] =
+  ## Copy Variable Byte Integer MQTT v5 properties into Nim-owned values.
+  var cursor = properties
+  var skipFirst = false
+  while true:
+    var value: uint32 = 0
+    let found = mosquitto_property_read_varint(
+      cursor,
+      identifier,
+      addr value,
+      skipFirst
+    )
+    if found == nil:
+      break
+
+    copied.add(makeProperty(value.int))
+    cursor = found
+    skipFirst = true
+
+  result = ok(MqttOk())
+
 proc copyBinaryProperty(properties: ptr mosquitto_property; identifier: cint;
                         makeProperty: proc(data: openArray[byte]): MqttProperty;
                         context: string;
@@ -230,6 +256,9 @@ proc copyServerKeepAliveProperty(value: uint16): MqttProperty =
 
 proc copyReceiveMaximumProperty(value: uint16): MqttProperty =
   result = receiveMaximum(value)
+
+proc copySubscriptionIdentifierProperty(value: int): MqttProperty =
+  result = subscriptionIdentifier(value)
 
 proc copyProperties*(properties: ptr mosquitto_property): MqttResult[MqttProperties] =
   ## Copy supported MQTT v5 properties from a libmosquitto property list.
@@ -343,6 +372,16 @@ proc copyProperties*(properties: ptr mosquitto_property): MqttResult[MqttPropert
   let userRes = copyUserProperties(properties, copied)
   if userRes.isErr:
     return err(userRes.error)
+
+  let subscriptionIdentifierRes = copyVarintProperty(
+    properties,
+    MqttPropSubscriptionIdentifierId.cint,
+    copySubscriptionIdentifierProperty,
+    "MQTT v5 Subscription Identifier",
+    copied
+  )
+  if subscriptionIdentifierRes.isErr:
+    return err(subscriptionIdentifierRes.error)
 
   let responseRes = copyStringProperty(
     properties,
@@ -475,14 +514,51 @@ proc buildMosquittoProperties*(properties: MqttProperties;
       if addRes.isErr:
         mosquitto_property_free_all(addr raw)
         return err(addRes.error)
-    of mpAssignedClientIdentifier, mpServerKeepAlive, mpReceiveMaximum,
-       mpMaximumPacketSize, mpReasonString, mpResponseInformation,
-       mpServerReference:
+    of mpSubscriptionIdentifier, mpAssignedClientIdentifier, mpServerKeepAlive,
+       mpReceiveMaximum, mpMaximumPacketSize, mpReasonString,
+       mpResponseInformation, mpServerReference:
       mosquitto_property_free_all(addr raw)
       return err(invalidArgument(context, &"{property.kind} is not valid for outgoing PUBLISH properties"))
     of mpUnknown:
       mosquitto_property_free_all(addr raw)
       return err(invalidArgument(context, "unknown MQTT property kind"))
+
+  result = ok(raw)
+
+proc buildMosquittoSubscribeProperties*(properties: MqttSubscribeProperties;
+                                        context = "MQTT v5 SUBSCRIBE properties"): MqttResult[ptr mosquitto_property] =
+  ## Convert typed MQTT v5 SUBSCRIBE properties to a libmosquitto property list.
+  ##
+  ## The caller owns the returned property list and must free it with
+  ## freeMosquittoProperties(), even when the subsequent libmosquitto call fails.
+  let validateRes = validateSubscribeProperties(properties, context)
+  if validateRes.isErr:
+    return err(validateRes.error)
+
+  var raw: ptr mosquitto_property = nil
+
+  if properties.subscriptionIdentifier.isSome:
+    let rc = mosquitto_property_add_varint(
+      addr raw,
+      MqttPropSubscriptionIdentifierId.cint,
+      properties.subscriptionIdentifier.get().uint32
+    )
+    let addRes = checkMosq(rc, "mosquitto_property_add_varint(Subscription Identifier)")
+    if addRes.isErr:
+      mosquitto_property_free_all(addr raw)
+      return err(addRes.error)
+
+  for item in properties.userProperties:
+    let rc = mosquitto_property_add_string_pair(
+      addr raw,
+      MqttPropUserPropertyId.cint,
+      item[0].cstring,
+      item[1].cstring
+    )
+    let addRes = checkMosq(rc, "mosquitto_property_add_string_pair(SUBSCRIBE User Property)")
+    if addRes.isErr:
+      mosquitto_property_free_all(addr raw)
+      return err(addRes.error)
 
   result = ok(raw)
 

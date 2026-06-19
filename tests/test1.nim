@@ -1511,6 +1511,7 @@ suite "mosquitto_nim MQTT v5 property helpers":
     check mqttPublishProperties(messageExpiryInterval(1'u32), messageExpiryInterval(2'u32)).isErr
     check mqttPublishProperties(contentType("text/plain"), contentType("application/json")).isErr
     check mqttPublishProperties(payloadFormatIndicatorUtf8(), payloadFormatIndicatorUnspecified()).isErr
+    check mqttPublishProperties(subscriptionIdentifier(1)).isErr
     check mqttPublishProperties(userProperty("a", "1"), userProperty("b", "2")).isOk
 
   test "typed MQTT v5 publish properties can be built mutably":
@@ -1530,6 +1531,96 @@ suite "mosquitto_nim MQTT v5 property helpers":
     check generic[3].intValue == 120'u32
     check generic[4].value == "text/plain"
     check generic[5].intValue == 1'u32
+
+  test "typed MQTT v5 subscribe properties convert to generic properties":
+    let typedRes = mqttSubscribeProperties(
+      subscriptionIdentifier(7),
+      userProperty("sub", "telemetry")
+    )
+    check typedRes.isOk
+    if typedRes.isOk:
+      let typed = typedRes.get()
+      check typed.subscriptionIdentifier.get() == 7
+      check typed.userProperties.len == 1
+      check typed.userProperties[0][0] == "sub"
+      check typed.userProperties[0][1] == "telemetry"
+
+      let generic = typed.toMqttProperties()
+      check generic.len == 2
+      check generic[0].kind == mpSubscriptionIdentifier
+      check generic[0].intValue == 7'u32
+      check generic[1].kind == mpUserProperty
+
+      let cmd = subscribeV5Command(
+        "mosquitto_nim/step30c/#",
+        properties = typed,
+        qos = qos1
+      )
+      check cmd.kind == mckSubscribe
+      check cmd.topic == "mosquitto_nim/step30c/#"
+      check cmd.qos == qos1
+      check cmd.properties.len == 2
+      check cmd.properties[0].kind == mpSubscriptionIdentifier
+
+  test "typed MQTT v5 subscribe properties can be built mutably":
+    var typed = noSubscribeProperties()
+    typed.setSubscriptionIdentifier(42)
+    typed.addUserProperty("route", "commands")
+
+    let validateRes = validateSubscribeProperties(typed)
+    check validateRes.isOk
+
+    let generic = typed.toMqttProperties()
+    check generic.len == 2
+    check generic[0].kind == mpSubscriptionIdentifier
+    check generic[0].intValue == 42'u32
+    check generic[1].name == "route"
+    check generic[1].value == "commands"
+
+  test "typed MQTT v5 subscribe properties reject invalid values":
+    check mqttSubscribeProperties(subscriptionIdentifier(0)).isErr
+    check mqttSubscribeProperties(subscriptionIdentifier(268435456)).isErr
+    check mqttSubscribeProperties(subscriptionIdentifier(1), subscriptionIdentifier(2)).isErr
+    check mqttSubscribeProperties(responseTopic("reply/not-for-subscribe")).isErr
+
+    var invalid = noSubscribeProperties()
+    invalid.setSubscriptionIdentifier(0)
+    check validateSubscribeProperties(invalid).isErr
+
+    invalid = noSubscribeProperties()
+    invalid.addUserProperty("", "bad")
+    check validateSubscribeProperties(invalid).isErr
+
+  test "supported MQTT v5 subscribe properties build into libmosquitto properties":
+    var typed = noSubscribeProperties()
+    typed.setSubscriptionIdentifier(9)
+    typed.addUserProperty("sub", "unit-test")
+
+    let rawRes = buildMosquittoSubscribeProperties(typed)
+    check rawRes.isOk
+    if rawRes.isOk:
+      var raw = rawRes.get()
+      check raw != nil
+      let copiedRes = copyProperties(raw)
+      check copiedRes.isOk
+      if copiedRes.isOk:
+        let copied = copiedRes.get()
+        check copied.len == 2
+
+        var sawSubscriptionIdentifier = false
+        var sawUser = false
+        for property in copied:
+          case property.kind
+          of mpSubscriptionIdentifier:
+            sawSubscriptionIdentifier = property.intValue == 9'u32
+          of mpUserProperty:
+            sawUser = property.name == "sub" and property.value == "unit-test"
+          else:
+            discard
+
+        check sawSubscriptionIdentifier
+        check sawUser
+      freeMosquittoProperties(raw)
 
   test "supported MQTT v5 publish properties build into libmosquitto properties":
     let props = @[
@@ -1660,6 +1751,7 @@ suite "mosquitto_nim MQTT v5 property helpers":
     check buildMosquittoProperties(@[responseTopic("")]).isErr
     check buildMosquittoProperties(@[responseTopic("mosquitto_nim/+")]).isErr
     check buildMosquittoProperties(@[payloadFormatIndicator(2'u8)]).isErr
+    check buildMosquittoProperties(@[subscriptionIdentifier(1)]).isErr
     check buildMosquittoProperties(@[assignedClientIdentifier("assigned")]).isErr
     check buildMosquittoProperties(@[reasonString("debug")]).isErr
 

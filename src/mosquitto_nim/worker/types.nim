@@ -412,13 +412,25 @@ proc publishV5Command*(topic: string; payload: string;
                        qos = qos0; retain = false; id = 0): MqttCommand =
   result = publishV5Command(topic, bytesFromString(payload), qos = qos, retain = retain, id = id, properties = properties)
 
-proc subscribeCommand*(topicFilter: string; qos = qos0; id = 0): MqttCommand =
+proc subscribeCommand*(topicFilter: string; qos = qos0; id = 0;
+                       properties: MqttProperties = @[]): MqttCommand =
   result = MqttCommand(
     id: id,
     kind: mckSubscribe,
     topic: topicFilter,
-    qos: qos
+    qos: qos,
+    properties: properties
   )
+
+proc subscribeV5Command*(topicFilter: string; qos = qos0; id = 0;
+                         properties: MqttProperties = @[]): MqttCommand =
+  ## Construct a SUBSCRIBE command carrying MQTT v5 SUBSCRIBE properties.
+  result = subscribeCommand(topicFilter, qos = qos, id = id, properties = properties)
+
+proc subscribeV5Command*(topicFilter: string; properties: MqttSubscribeProperties;
+                         qos = qos0; id = 0): MqttCommand =
+  ## Construct a SUBSCRIBE command carrying typed MQTT v5 SUBSCRIBE properties.
+  result = subscribeV5Command(topicFilter, qos = qos, id = id, properties = properties.toMqttProperties())
 
 proc unsubscribeCommand*(topicFilter: string; id = 0): MqttCommand =
   result = MqttCommand(

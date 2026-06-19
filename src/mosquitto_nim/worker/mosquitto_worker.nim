@@ -586,6 +586,28 @@ proc handleCommand(command: sink MqttCommand; running: var bool;
       sendWorkerError(eventQueue, invalidState("MQTT worker subscribe", "client is not connected"), cmd.id)
       return
 
+    if cmd.properties.len > 0:
+      if reconnect.lastConnectCommand.isSome and
+         reconnect.lastConnectCommand.get().protocolVersion != mpv5:
+        sendWorkerError(eventQueue, invalidArgument("MQTT worker subscribe", "SUBSCRIBE properties require MQTT 5"), cmd.id)
+        return
+
+      let typedPropsRes = mqttSubscribePropertiesFrom(cmd.properties)
+      if typedPropsRes.isErr:
+        sendWorkerError(eventQueue, typedPropsRes.error, cmd.id)
+        return
+
+      let subscribeRes = subscribeLowLevelClientV5(client, cmd.topic, cmd.qos, typedPropsRes.get())
+      if subscribeRes.isErr:
+        sendWorkerError(eventQueue, subscribeRes.error, cmd.id)
+        return
+
+      let mid = subscribeRes.get()
+      if mid != 0:
+        pendingSubscribes[mid] = cmd.id
+        sendWorkerPending(eventQueue, pendingPublishes, pendingSubscribes, pendingUnsubscribes, commandId = cmd.id)
+      return
+
     let subscribeRes = subscribeLowLevelClient(client, cmd.topic, cmd.qos)
     if subscribeRes.isErr:
       sendWorkerError(eventQueue, subscribeRes.error, cmd.id)

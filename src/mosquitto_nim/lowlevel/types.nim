@@ -52,6 +52,7 @@ type
     mpUserProperty
     mpResponseTopic
     mpCorrelationData
+    mpSubscriptionIdentifier
     mpMessageExpiryInterval
     mpContentType
     mpPayloadFormatIndicator
@@ -77,8 +78,8 @@ type
     ## This property model intentionally stores values in Nim-owned memory.
     ## User Property uses name/value; string properties such as Response Topic
     ## and Content Type use value; Correlation Data uses data; integer/byte
-    ## properties such as Message Expiry Interval and Payload Format Indicator
-    ## use intValue. Raw libmosquitto property pointers must not escape into this
+    ## properties such as Subscription Identifier, Message Expiry Interval, and
+    ## Payload Format Indicator use intValue. Raw libmosquitto property pointers must not escape into this
     ## type.
     kind*: MqttPropertyKind
     name*: string
@@ -117,9 +118,9 @@ type
   MqttSubscribeProperties* = object
     ## Typed MQTT v5 SUBSCRIBE properties.
     ##
-    ## This is an API-level container for future SUBSCRIBE property plumbing.
-    ## Existing subscribe paths still do not send MQTT v5 SUBSCRIBE properties
-    ## yet.
+    ## These properties are valid on MQTT v5 SUBSCRIBE packets.  They are kept
+    ## separate from PUBLISH/CONNECT properties so high-level code cannot attach
+    ## subscription metadata to the wrong operation.
     subscriptionIdentifier*: Option[int]
     userProperties*: seq[(string, string)]
 
@@ -278,6 +279,15 @@ proc correlationData*(data: string): MqttProperty =
   ## Construct an MQTT v5 Correlation Data property from a string.
   result = correlationData(bytesFromString(data))
 
+proc subscriptionIdentifier*(identifier: int): MqttProperty =
+  ## Construct an MQTT v5 Subscription Identifier property.
+  ##
+  ## Valid MQTT v5 Subscription Identifier values are 1..268435455. Validation is
+  ## performed when converting to typed SUBSCRIBE properties or libmosquitto
+  ## properties.
+  result = MqttProperty(kind: mpSubscriptionIdentifier, intValue: identifier.uint32)
+
+
 proc messageExpiryInterval*(seconds: uint32): MqttProperty =
   ## Construct an MQTT v5 Message Expiry Interval property.
   ##
@@ -432,6 +442,49 @@ proc noSubscribeProperties*(): MqttSubscribeProperties =
   ## Construct an empty typed MQTT v5 SUBSCRIBE property set.
   result = MqttSubscribeProperties()
 
+proc mqttSubscribeProperties*(subscriptionIdentifier: int): MqttSubscribeProperties =
+  ## Construct a typed MQTT v5 SUBSCRIBE property set with Subscription Identifier.
+  ##
+  ## Validation is performed by validateSubscribeProperties() and by the lowlevel
+  ## libmosquitto property builder. Keeping this constructor allocation-only lets
+  ## tests and callers construct values first, then validate at API boundaries.
+  result = MqttSubscribeProperties(
+    subscriptionIdentifier: some(subscriptionIdentifier)
+  )
+
+proc hasProperties*(properties: MqttSubscribeProperties): bool =
+  ## Return true when the SUBSCRIBE property set carries at least one property.
+  result = properties.subscriptionIdentifier.isSome or
+           properties.userProperties.len > 0
+
+proc validateSubscribeProperties*(properties: MqttSubscribeProperties;
+                                  context = "MQTT subscribe properties"): MqttResult[MqttOk] =
+  ## Validate typed MQTT v5 SUBSCRIBE properties before they reach libmosquitto.
+  ##
+  ## Subscription Identifier uses the MQTT v5 Variable Byte Integer range, but 0
+  ## is not a valid Subscription Identifier value. User Property names are kept
+  ## non-empty to avoid ambiguous broker-side metadata.
+  if properties.subscriptionIdentifier.isSome:
+    let identifier = properties.subscriptionIdentifier.get()
+    if identifier <= 0:
+      return err(invalidArgument(context, &"Subscription Identifier must be at least 1: {identifier}"))
+    if identifier > 268435455:
+      return err(invalidArgument(context, &"Subscription Identifier must be <= 268435455: {identifier}"))
+
+  for item in properties.userProperties:
+    if item[0].len == 0:
+      return err(invalidArgument(context, "User Property name must not be empty"))
+
+  result = ok(MqttOk())
+
+proc addUserProperty*(properties: var MqttSubscribeProperties; name, value: string) =
+  ## Add a User Property to a typed SUBSCRIBE property set.
+  properties.userProperties.add((name, value))
+
+proc setSubscriptionIdentifier*(properties: var MqttSubscribeProperties; identifier: int) =
+  ## Set MQTT v5 Subscription Identifier.
+  properties.subscriptionIdentifier = some(identifier)
+
 proc toMqttProperties*(properties: MqttPublishProperties): MqttProperties =
   ## Convert typed PUBLISH properties to the generic lowlevel representation.
   ##
@@ -457,6 +510,20 @@ proc toMqttProperties*(properties: MqttPublishProperties): MqttProperties =
 
   if properties.payloadFormatIndicator.isSome:
     result.add(payloadFormatIndicator(properties.payloadFormatIndicator.get()))
+
+proc toMqttProperties*(properties: MqttSubscribeProperties): MqttProperties =
+  ## Convert typed SUBSCRIBE properties to the generic lowlevel representation.
+  ##
+  ## Validation still happens in validateSubscribeProperties() and
+  ## buildMosquittoSubscribeProperties(), where libmosquitto property lists are
+  ## actually created.
+  result = @[]
+
+  if properties.subscriptionIdentifier.isSome:
+    result.add(subscriptionIdentifier(properties.subscriptionIdentifier.get()))
+
+  for item in properties.userProperties:
+    result.add(userProperty(item[0], item[1]))
 
 proc buildMqttPublishProperties(properties: openArray[MqttProperty]): MqttResult[MqttPublishProperties] =
   var typed = noPublishProperties()
@@ -490,23 +557,63 @@ proc buildMqttPublishProperties(properties: openArray[MqttProperty]): MqttResult
       typed.payloadFormatIndicator = some(indicatorRes.get())
     of mpUnknown:
       return err(invalidArgument("MQTT publish properties", "unknown property is not valid for PUBLISH"))
-    of mpAssignedClientIdentifier, mpServerKeepAlive, mpReceiveMaximum,
-       mpMaximumPacketSize, mpReasonString, mpResponseInformation,
-       mpServerReference:
+    of mpSubscriptionIdentifier, mpAssignedClientIdentifier, mpServerKeepAlive,
+       mpReceiveMaximum, mpMaximumPacketSize, mpReasonString,
+       mpResponseInformation, mpServerReference:
       return err(invalidArgument("MQTT publish properties", &"{property.kind} is not valid for PUBLISH"))
 
   result = ok(typed)
 
-proc mqttPublishProperties*(properties: openArray[MqttProperty]): MqttResult[MqttPublishProperties] =
-  ## Convert generic MQTT v5 properties into a typed PUBLISH property set.
+proc mqttPublishPropertiesFrom*(properties: openArray[MqttProperty]): MqttResult[MqttPublishProperties] =
+  ## Convert a generic MQTT v5 property array into a typed PUBLISH property set.
   ##
-  ## User Property may appear multiple times. The other currently supported
-  ## PUBLISH properties are single-instance and are rejected if duplicated.
+  ## This helper is intentionally named separately from the varargs convenience
+  ## overload below. In Nim 2.x, exporting both openArray and varargs overloads
+  ## with the same name makes calls with seq/openArray values ambiguous.
   result = buildMqttPublishProperties(properties)
 
 proc mqttPublishProperties*(properties: varargs[MqttProperty]): MqttResult[MqttPublishProperties] =
   ## Varargs convenience overload for typed MQTT v5 PUBLISH properties.
   result = buildMqttPublishProperties(properties)
+
+proc buildMqttSubscribeProperties(properties: openArray[MqttProperty]): MqttResult[MqttSubscribeProperties] =
+  var typed = noSubscribeProperties()
+
+  for property in properties:
+    case property.kind
+    of mpUserProperty:
+      typed.userProperties.add((property.name, property.value))
+    of mpSubscriptionIdentifier:
+      if typed.subscriptionIdentifier.isSome:
+        return err(invalidArgument("MQTT subscribe properties", "Subscription Identifier appears more than once"))
+      if property.intValue > 268435455'u32:
+        return err(invalidArgument("MQTT subscribe properties", &"Subscription Identifier must be <= 268435455: {property.intValue}"))
+      typed.subscriptionIdentifier = some(property.intValue.int)
+    of mpUnknown:
+      return err(invalidArgument("MQTT subscribe properties", "unknown property is not valid for SUBSCRIBE"))
+    of mpResponseTopic, mpCorrelationData, mpMessageExpiryInterval,
+       mpContentType, mpPayloadFormatIndicator, mpAssignedClientIdentifier,
+       mpServerKeepAlive, mpReceiveMaximum, mpMaximumPacketSize,
+       mpReasonString, mpResponseInformation, mpServerReference:
+      return err(invalidArgument("MQTT subscribe properties", &"{property.kind} is not valid for SUBSCRIBE"))
+
+  let validateRes = validateSubscribeProperties(typed)
+  if validateRes.isErr:
+    return err(validateRes.error)
+
+  result = ok(typed)
+
+proc mqttSubscribePropertiesFrom*(properties: openArray[MqttProperty]): MqttResult[MqttSubscribeProperties] =
+  ## Convert a generic MQTT v5 property array into a typed SUBSCRIBE property set.
+  ##
+  ## This helper is intentionally named separately from the varargs convenience
+  ## overload below. In Nim 2.x, exporting both openArray and varargs overloads
+  ## with the same name makes calls with seq/openArray values ambiguous.
+  result = buildMqttSubscribeProperties(properties)
+
+proc mqttSubscribeProperties*(properties: varargs[MqttProperty]): MqttResult[MqttSubscribeProperties] =
+  ## Varargs convenience overload for typed MQTT v5 SUBSCRIBE properties.
+  result = buildMqttSubscribeProperties(properties)
 
 proc addUserProperty*(properties: var MqttPublishProperties; name, value: string) =
   ## Add a User Property to a typed PUBLISH property set.
