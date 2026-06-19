@@ -52,18 +52,32 @@ type
     mpUserProperty
     mpResponseTopic
     mpCorrelationData
+    mpMessageExpiryInterval
+    mpContentType
+    mpPayloadFormatIndicator
+
+  MqttPayloadFormatIndicator* = enum
+    ## MQTT v5 Payload Format Indicator values.
+    ##
+    ## 0 means unspecified/binary payload. 1 means the payload is UTF-8 encoded
+    ## character data. Other values are invalid for MQTT v5.
+    mpfiUnspecified = 0
+    mpfiUtf8 = 1
 
   MqttProperty* = object
     ## Nim-owned MQTT v5 property.
     ##
     ## This property model intentionally stores values in Nim-owned memory.
-    ## User Property uses name/value, Response Topic uses value, and Correlation
-    ## Data uses data.  Raw libmosquitto property pointers must not escape into
-    ## this type.
+    ## User Property uses name/value; string properties such as Response Topic
+    ## and Content Type use value; Correlation Data uses data; integer/byte
+    ## properties such as Message Expiry Interval and Payload Format Indicator
+    ## use intValue. Raw libmosquitto property pointers must not escape into this
+    ## type.
     kind*: MqttPropertyKind
     name*: string
     value*: string
     data*: seq[byte]
+    intValue*: uint32
 
   MqttProperties* = seq[MqttProperty]
 
@@ -145,6 +159,19 @@ proc toMqttQos*(value: int; context = "MQTT QoS"): MqttResult[MqttQos] =
   else:
     result = err(invalidArgument(context, &"QoS must be 0, 1, or 2: {value}"))
 
+proc toMqttPayloadFormatIndicator*(value: uint32;
+                                   context = "MQTT Payload Format Indicator"): MqttResult[MqttPayloadFormatIndicator] =
+  ## Convert a raw MQTT v5 Payload Format Indicator value.
+  if value == 0'u32:
+    return ok(mpfiUnspecified)
+  if value == 1'u32:
+    return ok(mpfiUtf8)
+
+  result = err(invalidArgument(context, &"Payload Format Indicator must be 0 or 1: {value}"))
+
+proc toInt*(indicator: MqttPayloadFormatIndicator): int =
+  result = ord(indicator)
+
 
 proc bytesFromString*(payload: string): seq[byte] =
   ## Convert a Nim string to MQTT payload bytes.
@@ -208,6 +235,36 @@ proc correlationData*(data: openArray[byte]): MqttProperty =
 proc correlationData*(data: string): MqttProperty =
   ## Construct an MQTT v5 Correlation Data property from a string.
   result = correlationData(bytesFromString(data))
+
+proc messageExpiryInterval*(seconds: uint32): MqttProperty =
+  ## Construct an MQTT v5 Message Expiry Interval property.
+  ##
+  ## The value is seconds. A value of 0 means the message expires immediately
+  ## after it has been processed by the server.
+  result = MqttProperty(kind: mpMessageExpiryInterval, intValue: seconds)
+
+proc contentType*(value: string): MqttProperty =
+  ## Construct an MQTT v5 Content Type property.
+  result = MqttProperty(kind: mpContentType, value: value)
+
+proc payloadFormatIndicator*(indicator: MqttPayloadFormatIndicator): MqttProperty =
+  ## Construct an MQTT v5 Payload Format Indicator property.
+  result = MqttProperty(kind: mpPayloadFormatIndicator, intValue: ord(indicator).uint32)
+
+proc payloadFormatIndicator*(value: uint8): MqttProperty =
+  ## Construct an MQTT v5 Payload Format Indicator property from a raw byte.
+  ##
+  ## This overload is useful when copying values from libmosquitto. Validation is
+  ## performed by buildMosquittoProperties() before sending.
+  result = MqttProperty(kind: mpPayloadFormatIndicator, intValue: value.uint32)
+
+proc payloadFormatIndicatorUtf8*(): MqttProperty =
+  ## Construct Payload Format Indicator = UTF-8 encoded character data.
+  result = payloadFormatIndicator(mpfiUtf8)
+
+proc payloadFormatIndicatorUnspecified*(): MqttProperty =
+  ## Construct Payload Format Indicator = unspecified/binary payload.
+  result = payloadFormatIndicator(mpfiUnspecified)
 
 proc hasProperties*(properties: MqttProperties): bool {.inline.} =
   result = properties.len > 0

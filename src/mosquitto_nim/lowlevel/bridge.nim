@@ -28,6 +28,12 @@ proc copyPayload*(payload: pointer; payloadLen: cint;
 # MQTT v5 property helpers.
 # ------------------------------------------------------------------------------
 const
+  MqttPropPayloadFormatIndicatorId* = 1
+    ## MQTT v5 Payload Format Indicator identifier (0x01).
+  MqttPropMessageExpiryIntervalId* = 2
+    ## MQTT v5 Message Expiry Interval identifier (0x02).
+  MqttPropContentTypeId* = 3
+    ## MQTT v5 Content Type identifier (0x03).
   MqttPropResponseTopicId* = 8
     ## MQTT v5 Response Topic identifier (0x08).
   MqttPropCorrelationDataId* = 9
@@ -91,6 +97,54 @@ proc copyStringProperty(properties: ptr mosquitto_property; identifier: cint;
 
   result = ok(MqttOk())
 
+proc copyByteProperty(properties: ptr mosquitto_property; identifier: cint;
+                      makeProperty: proc(value: uint8): MqttProperty;
+                      context: string;
+                      copied: var MqttProperties): MqttResult[MqttOk] =
+  ## Copy byte MQTT v5 properties into Nim-owned MqttProperty values.
+  var cursor = properties
+  var skipFirst = false
+  while true:
+    var value: uint8 = 0
+    let found = mosquitto_property_read_byte(
+      cursor,
+      identifier,
+      addr value,
+      skipFirst
+    )
+    if found == nil:
+      break
+
+    copied.add(makeProperty(value))
+    cursor = found
+    skipFirst = true
+
+  result = ok(MqttOk())
+
+proc copyInt32Property(properties: ptr mosquitto_property; identifier: cint;
+                       makeProperty: proc(value: uint32): MqttProperty;
+                       context: string;
+                       copied: var MqttProperties): MqttResult[MqttOk] =
+  ## Copy 32-bit integer MQTT v5 properties into Nim-owned MqttProperty values.
+  var cursor = properties
+  var skipFirst = false
+  while true:
+    var value: uint32 = 0
+    let found = mosquitto_property_read_int32(
+      cursor,
+      identifier,
+      addr value,
+      skipFirst
+    )
+    if found == nil:
+      break
+
+    copied.add(makeProperty(value))
+    cursor = found
+    skipFirst = true
+
+  result = ok(MqttOk())
+
 proc copyBinaryProperty(properties: ptr mosquitto_property; identifier: cint;
                         makeProperty: proc(data: openArray[byte]): MqttProperty;
                         context: string;
@@ -124,6 +178,9 @@ proc copyBinaryProperty(properties: ptr mosquitto_property; identifier: cint;
 
   result = ok(MqttOk())
 
+proc copyPayloadFormatIndicatorProperty(value: uint8): MqttProperty =
+  result = payloadFormatIndicator(value)
+
 proc copyProperties*(properties: ptr mosquitto_property): MqttResult[MqttProperties] =
   ## Copy supported MQTT v5 properties from a libmosquitto property list.
   ##
@@ -132,6 +189,36 @@ proc copyProperties*(properties: ptr mosquitto_property): MqttResult[MqttPropert
   var copied: MqttProperties = @[]
   if properties == nil:
     return ok(copied)
+
+  let payloadFormatRes = copyByteProperty(
+    properties,
+    MqttPropPayloadFormatIndicatorId.cint,
+    copyPayloadFormatIndicatorProperty,
+    "MQTT v5 Payload Format Indicator",
+    copied
+  )
+  if payloadFormatRes.isErr:
+    return err(payloadFormatRes.error)
+
+  let expiryRes = copyInt32Property(
+    properties,
+    MqttPropMessageExpiryIntervalId.cint,
+    messageExpiryInterval,
+    "MQTT v5 Message Expiry Interval",
+    copied
+  )
+  if expiryRes.isErr:
+    return err(expiryRes.error)
+
+  let contentTypeRes = copyStringProperty(
+    properties,
+    MqttPropContentTypeId.cint,
+    contentType,
+    "MQTT v5 Content Type",
+    copied
+  )
+  if contentTypeRes.isErr:
+    return err(contentTypeRes.error)
 
   let userRes = copyUserProperties(properties, copied)
   if userRes.isErr:
@@ -230,6 +317,41 @@ proc buildMosquittoProperties*(properties: MqttProperties;
         property.data.len.uint16
       )
       let addRes = checkMosq(rc, "mosquitto_property_add_binary(Correlation Data)")
+      if addRes.isErr:
+        mosquitto_property_free_all(addr raw)
+        return err(addRes.error)
+    of mpMessageExpiryInterval:
+      let rc = mosquitto_property_add_int32(
+        addr raw,
+        MqttPropMessageExpiryIntervalId.cint,
+        property.intValue
+      )
+      let addRes = checkMosq(rc, "mosquitto_property_add_int32(Message Expiry Interval)")
+      if addRes.isErr:
+        mosquitto_property_free_all(addr raw)
+        return err(addRes.error)
+    of mpContentType:
+      let rc = mosquitto_property_add_string(
+        addr raw,
+        MqttPropContentTypeId.cint,
+        property.value.cstring
+      )
+      let addRes = checkMosq(rc, "mosquitto_property_add_string(Content Type)")
+      if addRes.isErr:
+        mosquitto_property_free_all(addr raw)
+        return err(addRes.error)
+    of mpPayloadFormatIndicator:
+      let indicatorRes = toMqttPayloadFormatIndicator(property.intValue, context)
+      if indicatorRes.isErr:
+        mosquitto_property_free_all(addr raw)
+        return err(indicatorRes.error)
+
+      let rc = mosquitto_property_add_byte(
+        addr raw,
+        MqttPropPayloadFormatIndicatorId.cint,
+        property.intValue.uint8
+      )
+      let addRes = checkMosq(rc, "mosquitto_property_add_byte(Payload Format Indicator)")
       if addRes.isErr:
         mosquitto_property_free_all(addr raw)
         return err(addRes.error)

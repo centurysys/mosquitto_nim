@@ -223,7 +223,7 @@ proc publishCommandBytes(cmd: MqttCommand): int {.raises: [].} =
     result += property.name.len
     result += property.value.len
     result += property.data.len
-    result += 8
+    result += 12
 
 proc offlineQueueFits(policy: MqttOfflineQueuePolicy;
                       offlineQueue: seq[OfflinePublishItem];

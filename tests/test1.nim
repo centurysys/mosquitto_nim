@@ -1216,21 +1216,79 @@ suite "mosquitto_nim MQTT v5 property helpers":
     check correlationProp.kind == mpCorrelationData
     check correlationProp.propertyDataString() == "correlation-1"
 
+    let expiryProp = messageExpiryInterval(60'u32)
+    check expiryProp.kind == mpMessageExpiryInterval
+    check expiryProp.intValue == 60'u32
+
+    let contentTypeProp = contentType("application/json")
+    check contentTypeProp.kind == mpContentType
+    check contentTypeProp.value == "application/json"
+
+    let payloadFormatProp = payloadFormatIndicatorUtf8()
+    check payloadFormatProp.kind == mpPayloadFormatIndicator
+    check payloadFormatProp.intValue == 1'u32
+    check payloadFormatIndicatorUnspecified().intValue == 0'u32
+    check toMqttPayloadFormatIndicator(1'u32).get() == mpfiUtf8
+    check toMqttPayloadFormatIndicator(2'u32).isErr
+
     let cmd = publishV5Command(
       "mosquitto_nim/step19/property",
       "hello",
       qos = qos1,
-      properties = @[userProp, responseProp, correlationProp]
+      properties = @[
+        userProp,
+        responseProp,
+        correlationProp,
+        expiryProp,
+        contentTypeProp,
+        payloadFormatProp
+      ]
     )
-    check cmd.properties.len == 3
+    check cmd.properties.len == 6
     check cmd.properties[0].name == "trace-id"
     check cmd.properties[1].value == "mosquitto_nim/reply"
     check cmd.properties[2].propertyDataString() == "correlation-1"
+    check cmd.properties[3].intValue == 60'u32
+    check cmd.properties[4].value == "application/json"
+    check cmd.properties[5].intValue == 1'u32
+
+  test "supported MQTT v5 publish properties build into libmosquitto properties":
+    let props = @[
+      userProperty("trace-id", "step28"),
+      responseTopic("mosquitto_nim/reply"),
+      correlationData("correlation-step28"),
+      messageExpiryInterval(30'u32),
+      contentType("application/json"),
+      payloadFormatIndicatorUtf8()
+    ]
+    let rawRes = buildMosquittoProperties(props)
+    check rawRes.isOk
+    if rawRes.isOk:
+      var raw = rawRes.get()
+      check raw != nil
+      let copiedRes = copyProperties(raw)
+      check copiedRes.isOk
+      if copiedRes.isOk:
+        let copied = copiedRes.get()
+        check copied.len == 6
+        check copied[0].kind == mpPayloadFormatIndicator
+        check copied[0].intValue == 1'u32
+        check copied[1].kind == mpMessageExpiryInterval
+        check copied[1].intValue == 30'u32
+        check copied[2].kind == mpContentType
+        check copied[2].value == "application/json"
+        check copied[3].kind == mpUserProperty
+        check copied[3].name == "trace-id"
+        check copied[4].kind == mpResponseTopic
+        check copied[5].kind == mpCorrelationData
+        check copied[5].propertyDataString() == "correlation-step28"
+      freeMosquittoProperties(raw)
 
   test "invalid MQTT v5 properties are rejected by lowlevel property builder":
     check buildMosquittoProperties(@[userProperty("", "bad")]).isErr
     check buildMosquittoProperties(@[responseTopic("")]).isErr
     check buildMosquittoProperties(@[responseTopic("mosquitto_nim/+")]).isErr
+    check buildMosquittoProperties(@[payloadFormatIndicator(2'u8)]).isErr
 
 
 when getEnv("MOSQUITTO_NIM_TEST_BROKER") == "1":
@@ -1415,7 +1473,10 @@ when getEnv("MOSQUITTO_NIM_TEST_BROKER") == "1":
       let props = @[
         userProperty("trace-id", "step19-lowlevel"),
         responseTopic(responseTopicName),
-        correlationData("corr-step20-lowlevel")
+        correlationData("corr-step20-lowlevel"),
+        messageExpiryInterval(45'u32),
+        contentType("text/plain"),
+        payloadFormatIndicatorUtf8()
       ]
       let pubRes = publishLowLevelClientV5(
         client,
@@ -1440,6 +1501,9 @@ when getEnv("MOSQUITTO_NIM_TEST_BROKER") == "1":
         var sawUserProperty = false
         var sawResponseTopic = false
         var sawCorrelationData = false
+        var sawMessageExpiry = false
+        var sawContentType = false
+        var sawPayloadFormat = false
         for property in received[0].properties:
           case property.kind
           of mpUserProperty:
@@ -1451,11 +1515,23 @@ when getEnv("MOSQUITTO_NIM_TEST_BROKER") == "1":
           of mpCorrelationData:
             if property.propertyDataString() == "corr-step20-lowlevel":
               sawCorrelationData = true
+          of mpMessageExpiryInterval:
+            if property.intValue == 45'u32:
+              sawMessageExpiry = true
+          of mpContentType:
+            if property.value == "text/plain":
+              sawContentType = true
+          of mpPayloadFormatIndicator:
+            if property.intValue == 1'u32:
+              sawPayloadFormat = true
           else:
             discard
         check sawUserProperty
         check sawResponseTopic
         check sawCorrelationData
+        check sawMessageExpiry
+        check sawContentType
+        check sawPayloadFormat
 
       discard disconnectLowLevelClient(client)
       discard closeLowLevelClient(client)
@@ -1491,7 +1567,10 @@ when getEnv("MOSQUITTO_NIM_TEST_BROKER") == "1":
           properties = @[
             userProperty("trace-id", "step19-nmqtt"),
             responseTopic("mosquitto_nim/step20/v5/reply/nmqtt"),
-            correlationData("corr-step20-nmqtt")
+            correlationData("corr-step20-nmqtt"),
+            messageExpiryInterval(30'u32),
+            contentType("text/plain"),
+            payloadFormatIndicatorUtf8()
           ]
         )
 

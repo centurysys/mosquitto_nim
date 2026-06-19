@@ -72,6 +72,10 @@ Currently supported:
 - `userProperty(name, value)`
 - `responseTopic(topic)`
 - `correlationData(data)`
+- `messageExpiryInterval(seconds)`
+- `contentType(value)`
+- `payloadFormatIndicatorUtf8()`
+- `payloadFormatIndicatorUnspecified()`
 
 These can be passed to `publishV5()` through highlevel or compatibility APIs.
 
@@ -251,6 +255,9 @@ await ctx.publishV5(
     userProperty("trace-id", "abc123"),
     responseTopic("rpc/response/client1"),
     correlationData(@[0x01'u8, 0x02, 0x03]),
+    messageExpiryInterval(60'u32),
+    contentType("text/plain"),
+    payloadFormatIndicatorUtf8(),
   ],
 )
 ```

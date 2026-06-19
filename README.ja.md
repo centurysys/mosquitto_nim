@@ -35,6 +35,9 @@
   - User Property
   - Response Topic
   - Correlation Data
+  - Message Expiry Interval
+  - Content Type
+  - Payload Format Indicator
 
 ## 必要なもの
 
@@ -114,6 +117,9 @@ proc main() {.async.} =
       userProperty("trace-id", "abc123"),
       responseTopic("demo/response"),
       correlationData(@[1'u8, 2, 3, 4]),
+      messageExpiryInterval(60'u32),
+      contentType("text/plain"),
+      payloadFormatIndicatorUtf8(),
     ],
   )
 
