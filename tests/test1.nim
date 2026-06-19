@@ -1055,3 +1055,100 @@ when getEnv("MOSQUITTO_NIM_TEST_BROKER") == "1":
         return receivedTopic == topic and receivedPayload == "hello-nmqtt-compat"
 
       check waitFor scenario()
+
+when getEnv("MOSQUITTO_NIM_TEST_BROKER") == "1":
+  suite "mosquitto_nim MQTT v5 broker smoke test":
+    test "lowlevel client can connect and exchange messages with MQTT v5":
+      let host = getEnv("MOSQUITTO_NIM_TEST_HOST", "127.0.0.1")
+      let port = parseInt(getEnv("MOSQUITTO_NIM_TEST_PORT", "1883"))
+      let topic = "mosquitto_nim/step18/v5/lowlevel/" & $getTime().toUnix() & "_" & $getCurrentProcessId()
+
+      check initLibrary().isOk
+
+      let clientRes = newLowLevelClient("mosquitto_nim_step18_v5_lowlevel")
+      check clientRes.isOk
+      let client = clientRes.get()
+
+      var received: seq[MqttMessage] = @[]
+      let sink: MessageSink = proc(message: MqttMessage) =
+        received.add(message)
+
+      check setProtocolVersion(client, mpv5).isOk
+      check setMessageSink(client, sink).isOk
+      check connectLowLevelClient(client, host, port).isOk
+
+      for _ in 0 ..< 10:
+        check loopLowLevelClient(client, timeoutMs = 20).isOk
+
+      let subRes = subscribeLowLevelClient(client, topic, qos1)
+      check subRes.isOk
+
+      for _ in 0 ..< 10:
+        check loopLowLevelClient(client, timeoutMs = 20).isOk
+
+      let pubRes = publishLowLevelClient(client, topic, "hello-v5-lowlevel", qos1)
+      check pubRes.isOk
+
+      for _ in 0 ..< 80:
+        check loopLowLevelClient(client, timeoutMs = 20).isOk
+        if received.len > 0:
+          break
+
+      check lastCallbackError(client).isNone
+      check received.len == 1
+      if received.len == 1:
+        check received[0].topic == topic
+        check received[0].payloadString() == "hello-v5-lowlevel"
+        check received[0].qos == qos1
+
+      discard disconnectLowLevelClient(client)
+      discard closeLowLevelClient(client)
+      check cleanupLibrary().isOk
+
+    test "nmqtt compatibility facade can use MQTT v5 explicitly":
+      proc scenario(): Future[bool] {.async.} =
+        let host = getEnv("MOSQUITTO_NIM_TEST_HOST", "127.0.0.1")
+        let port = parseInt(getEnv("MOSQUITTO_NIM_TEST_PORT", "1883"))
+        let topic = "mosquitto_nim/step18/v5/nmqtt_compat/" & $getTime().toUnix() & "_" & $getCurrentProcessId()
+
+        let ctx = newMqttCtx("mosquitto_nim_step18_v5_nmqtt")
+        ctx.set_host(host, port)
+        ctx.setProtocolVersion(mpv5)
+        ctx.set_ping_interval(30)
+
+        var receivedTopic = ""
+        var receivedPayload = ""
+        proc onData(topic: string; message: string) =
+          receivedTopic = topic
+          receivedPayload = message
+
+        await ctx.start()
+        check ctx.isConnected()
+
+        await ctx.subscribe(topic, 1, onData)
+        await sleepAsync(100)
+
+        await ctx.publish(topic, "hello-v5-nmqtt-compat", 1, retain = false)
+
+        for _ in 0 ..< 400:
+          if receivedPayload == "hello-v5-nmqtt-compat":
+            break
+          await sleepAsync(10)
+
+        check receivedTopic == topic
+        check receivedPayload == "hello-v5-nmqtt-compat"
+
+        for _ in 0 ..< 400:
+          if ctx.msgQueue() == 0:
+            break
+          await sleepAsync(10)
+        check ctx.msgQueue() == 0
+
+        await ctx.unsubscribe(topic)
+        await sleepAsync(50)
+        await ctx.disconnect()
+        check not ctx.isConnected()
+        return receivedTopic == topic and receivedPayload == "hello-v5-nmqtt-compat"
+
+      check waitFor scenario()
+
