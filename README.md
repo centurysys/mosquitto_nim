@@ -29,7 +29,7 @@ Currently implemented:
 - asyncdispatch bridge for worker events
 - highlevel client facade
 - highlevel message dispatcher
-- minimal nmqtt-compatible facade
+- nmqtt-style facade with mosquitto_nim extensions
 - username/password authentication plumbing
 - Will message plumbing
 - TLS configuration plumbing with OS trust store, explicit CA, mTLS client cert/key, and explicit insecure mode
@@ -167,6 +167,11 @@ waitFor main()
 
 ## nmqtt compatibility scope
 
+`highlevel/nmqtt_compat` is not intended to be a byte-for-byte reimplementation
+of every nmqtt API. It is a **nmqtt-style facade that preserves the basic API
+shape and default behavior while adding mosquitto_nim-specific practical
+extensions**.
+
 The compatibility facade intentionally preserves nmqtt-style queue-oriented
 publish semantics:
 
@@ -174,33 +179,73 @@ publish semantics:
   command queue.
 - It does not wait for PUBACK or `PublishCompleted`.
 - Publish completion is tracked separately through worker/highlevel events.
+- After `start()`, reconnect and offline publish queueing are enabled by
+  default in the compatibility facade to match nmqtt-style usage.
 
-Currently supported in the compatibility facade:
+### nmqtt-compatible API
+
+These APIs are intended to match the original nmqtt API shape or behavior.
 
 - `newMqttCtx(clientId)`
 - `set_host(host, port = 1883, sslOn = false)`
 - `set_ping_interval(seconds)`
 - `set_auth(username, password)`
-- `set_tls_os_certs()` / `set_tls_ca(cafile)` / `set_tls_capath(capath)`
-- `set_tls_insecure(insecure = true)`
 - `set_ssl_certificates(certfile, keyfile)`
 - `set_will(topic, message, qos = 0, retain = false)`
-- `setProtocolVersion(mpv311 | mpv5)`
 - `start()`
 - `connect()`
 - `disconnect()`
 - `publish(topic, message, qos = 0, retain = false)`
-- `publishV5(...)` as an extension API
 - `subscribe(topic, qos, callback)`
-- `subscribeV5(...)` as an extension API
 - `unsubscribe(topic)`
 - `isConnected()`
 - `msgQueue()`
 
+### mosquitto_nim extension API
+
+The following APIs are mosquitto_nim extensions for `libmosquitto`, MQTT v5,
+reconnect, offline queueing, TLS, and diagnostics.
+
+- MQTT protocol version:
+  - `setProtocolVersion(mpv311 | mpv5)`
+- MQTT v5 CONNECT metadata:
+  - `setConnectProperties(...)`
+  - `connectProperties()`
+  - `clearConnectProperties()`
+- MQTT v5 PUBLISH metadata:
+  - `publishV5(...)`
+  - `MqttPublishProperties`
+- MQTT v5 SUBSCRIBE metadata:
+  - `subscribeV5(...)`
+  - `MqttSubscribeProperties`
+- TLS trust source / test configuration:
+  - `set_tls_os_certs()`
+  - `set_tls_ca(cafile)`
+  - `set_tls_capath(capath)`
+  - `set_tls_insecure(insecure = true)`
+  - `tlsConfig()`
+  - `setTls(...)`
+  - `clearTls()`
+- Reconnect / offline queue policy:
+  - `setReconnectPolicy(...)`
+  - `enableReconnect(...)`
+  - `disableReconnect()`
+  - `setOfflineQueuePolicy(...)`
+  - `enableOfflineQueue(...)`
+  - `disableOfflineQueue()`
+- State and diagnostics:
+  - `currentState()`
+  - `pendingOperations()`
+  - `queueSnapshot()`
+  - `lastConnectReasonCode()`
+  - `lastConnectProperties()`
+
 Not yet complete:
 
-- Full nmqtt API parity
-- Full MQTT v5 property coverage
+- nmqtt compatibility matrix
+- Maintaining the split between original nmqtt-compatible APIs and
+  mosquitto_nim extension APIs
+- Additional MQTT v5 property coverage
 - Advanced reconnect/offline-queue edge-case coverage
 - TLS integration tests against an actual TLS broker
 - WebSocket / WSS support

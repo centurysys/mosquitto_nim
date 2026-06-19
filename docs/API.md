@@ -273,12 +273,14 @@ Typical module:
 import mosquitto_nim/highlevel/nmqtt_compat
 ```
 
-The goal is source-level familiarity with nmqtt while keeping the new
-libmosquitto/threadtools implementation underneath.
+This module is not meant to be a byte-for-byte reimplementation of every nmqtt
+API. It is a **nmqtt-style facade that preserves familiar usage and default
+behavior while adding mosquitto_nim-specific practical extensions**. The
+implementation underneath is `libmosquitto + threadtools + asyncdispatch`.
 
-### Supported API
+### nmqtt-compatible API
 
-Currently supported:
+These APIs are intended to match the original nmqtt API shape or behavior.
 
 ```nim
 let ctx = newMqttCtx("client-id")
@@ -286,10 +288,8 @@ let ctx = newMqttCtx("client-id")
 ctx.set_host("127.0.0.1", 1883)
 ctx.set_ping_interval(30)
 ctx.set_auth("user", "pass")
-discard ctx.set_tls_os_certs()
 ctx.set_ssl_certificates("client.crt", "client.key")
 ctx.set_will("client/status", "offline", qos = 1, retain = true)
-ctx.setProtocolVersion(mpv5)
 
 await ctx.start()
 await ctx.publish("topic", "payload", qos = 0, retain = false)
@@ -309,14 +309,38 @@ await ctx.disconnect()
 `publish()` keeps nmqtt-style queue-oriented behavior. It returns after the
 command is accepted by the worker queue, not after PUBACK.
 
-`msgQueue()` tracks unfinished work such as QoS publish completion and
-subscribe/unsubscribe acknowledgements.
+`msgQueue()` returns unfinished work as seen by the compatibility facade, such
+as QoS publish completion, subscribe/unsubscribe acknowledgements, and offline
+queued publishes.
 
-### Extension API
+After `start()`, reconnect and offline publish queueing are enabled by default
+in the compatibility facade to match nmqtt-style usage.
 
-`setConnectProperties()` configures MQTT v5 CONNECT metadata, `publishV5()` sends MQTT v5 PUBLISH metadata, and `subscribeV5()` sends MQTT v5 SUBSCRIBE metadata.
+### mosquitto_nim extension API
 
-CONNECT example:
+The following APIs are mosquitto_nim extensions rather than original nmqtt APIs.
+
+#### MQTT protocol version
+
+```nim
+ctx.setProtocolVersion(mpv5)
+```
+
+#### TLS trust source / test configuration
+
+```nim
+discard ctx.set_tls_os_certs()
+discard ctx.set_tls_ca("ca.crt")
+discard ctx.set_tls_capath("/etc/ssl/certs")
+ctx.set_tls_insecure(true)  # test only
+```
+
+`set_ssl_certificates(certfile, keyfile)` remains available as a compatibility
+API, while mosquitto_nim treats it as mTLS client certificate / private key
+configuration. For public-CA brokers, use `set_tls_os_certs()` or
+`set_tls_ca()`.
+
+#### MQTT v5 CONNECT metadata
 
 ```nim
 var connectProps = noConnectProperties()
@@ -327,7 +351,7 @@ discard ctx.setConnectProperties(connectProps)
 ctx.setProtocolVersion(mpv5)
 ```
 
-SUBSCRIBE example:
+#### MQTT v5 SUBSCRIBE metadata
 
 ```nim
 var subProps = noSubscribeProperties()
@@ -338,7 +362,7 @@ await ctx.subscribeV5("telemetry/#", subProps, 1) do (topic, message: string):
   echo topic, ": ", message
 ```
 
-PUBLISH example:
+#### MQTT v5 PUBLISH metadata
 
 ```nim
 var props = noPublishProperties()
@@ -356,6 +380,26 @@ await ctx.publishV5(
   properties = props,
 )
 ```
+
+#### Reconnect / offline queue policy
+
+```nim
+discard ctx.enableReconnect(initialDelayMs = 1000, maxDelayMs = 30000)
+discard ctx.enableOfflineQueue(maxMessages = 100, maxBytes = 1024 * 1024)
+```
+
+#### State and diagnostics
+
+```nim
+echo ctx.currentState()
+echo ctx.pendingOperations()
+echo ctx.queueSnapshot()
+echo ctx.lastConnectReasonCode()
+echo ctx.lastConnectProperties()
+```
+
+The compatibility and extension API lists should eventually be split into a
+dedicated `docs/NMQTT_COMPAT.md` compatibility matrix.
 
 ## 6. Testing
 

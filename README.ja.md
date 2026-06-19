@@ -26,7 +26,7 @@
 - worker event を asyncdispatch 側へ渡す bridge
 - highlevel client facade
 - highlevel message dispatcher
-- 最小 nmqtt 互換 facade
+- nmqtt 風 facade と mosquitto_nim 拡張 API
 - username/password 認証の設定伝搬
 - Will message の設定伝搬
 - OS trust store / 明示 CA / mTLS client cert/key / 明示 insecure mode を含む TLS 設定伝搬
@@ -160,38 +160,77 @@ waitFor main()
 
 ## nmqtt互換範囲
 
+`highlevel/nmqtt_compat` は、元の nmqtt API を完全に再実装する層ではなく、**nmqtt 風の基本 API と既定挙動を保ちながら、mosquitto_nim 独自の実用 API を追加した facade** です。
+
 互換 facade では、nmqtt 風の queue-oriented な `publish()` の意味を維持します。
 
 - `publish()` は publish command が worker command queue に投入できた時点で戻ります。
 - PUBACK や `PublishCompleted` は待ちません。
 - publish 完了は worker/highlevel event として別途追跡します。
+- `start()` 後の reconnect と offline publish queue は nmqtt 風の利用感に寄せ、compat facade では既定で有効です。
 
-現在サポートしている互換API:
+### nmqtt 互換 API
+
+元の nmqtt と同じ、または同等の意味で使うことを意図している API です。
 
 - `newMqttCtx(clientId)`
 - `set_host(host, port = 1883, sslOn = false)`
 - `set_ping_interval(seconds)`
 - `set_auth(username, password)`
-- `set_tls_os_certs()` / `set_tls_ca(cafile)` / `set_tls_capath(capath)`
-- `set_tls_insecure(insecure = true)`
 - `set_ssl_certificates(certfile, keyfile)`
 - `set_will(topic, message, qos = 0, retain = false)`
-- `setProtocolVersion(mpv311 | mpv5)`
 - `start()`
 - `connect()`
 - `disconnect()`
 - `publish(topic, message, qos = 0, retain = false)`
-- `publishV5(...)` 独自拡張API
 - `subscribe(topic, qos, callback)`
-- `subscribeV5(...)` 独自拡張API
 - `unsubscribe(topic)`
 - `isConnected()`
 - `msgQueue()`
 
+### mosquitto_nim 拡張 API
+
+以下は nmqtt そのものにはない、`libmosquitto` / MQTT v5 / reconnect / TLS 運用向けの拡張 API です。
+
+- MQTT protocol version:
+  - `setProtocolVersion(mpv311 | mpv5)`
+- MQTT v5 CONNECT metadata:
+  - `setConnectProperties(...)`
+  - `connectProperties()`
+  - `clearConnectProperties()`
+- MQTT v5 PUBLISH metadata:
+  - `publishV5(...)`
+  - `MqttPublishProperties`
+- MQTT v5 SUBSCRIBE metadata:
+  - `subscribeV5(...)`
+  - `MqttSubscribeProperties`
+- TLS trust source / test configuration:
+  - `set_tls_os_certs()`
+  - `set_tls_ca(cafile)`
+  - `set_tls_capath(capath)`
+  - `set_tls_insecure(insecure = true)`
+  - `tlsConfig()`
+  - `setTls(...)`
+  - `clearTls()`
+- reconnect / offline queue policy:
+  - `setReconnectPolicy(...)`
+  - `enableReconnect(...)`
+  - `disableReconnect()`
+  - `setOfflineQueuePolicy(...)`
+  - `enableOfflineQueue(...)`
+  - `disableOfflineQueue()`
+- 状態・診断情報:
+  - `currentState()`
+  - `pendingOperations()`
+  - `queueSnapshot()`
+  - `lastConnectReasonCode()`
+  - `lastConnectProperties()`
+
 未完成・今後の対象:
 
-- nmqtt API完全互換
-- MQTT v5 properties の全対応
+- nmqtt compatibility matrix の整理
+- 元 nmqtt API と mosquitto_nim 拡張 API の分類維持
+- MQTT v5 properties の追加対応
 - reconnect / offline queue の詳細な edge-case 対応
 - TLS broker 実接続テスト
 - WebSocket / WSS 対応

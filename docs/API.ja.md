@@ -264,11 +264,11 @@ topic filter は通常の MQTT subscription filter を扱います。
 import mosquitto_nim/highlevel/nmqtt_compat
 ```
 
-目的は、nmqtt に近い書き味を保ちながら、内部実装を `libmosquitto + threadtools + asyncdispatch` にすることです。
+この module は、元の nmqtt API を完全に再実装するためのものではなく、**nmqtt に近い書き味と既定挙動を保ちながら、mosquitto_nim 独自の実用 API を追加する facade** です。内部実装は `libmosquitto + threadtools + asyncdispatch` です。
 
-### 対応API
+### nmqtt 互換 API
 
-現時点で対応している範囲:
+元の nmqtt と同じ、または同等の意味で使うことを意図している API です。
 
 ```nim
 let ctx = newMqttCtx("client-id")
@@ -276,10 +276,8 @@ let ctx = newMqttCtx("client-id")
 ctx.set_host("127.0.0.1", 1883)
 ctx.set_ping_interval(30)
 ctx.set_auth("user", "pass")
-discard ctx.set_tls_os_certs()
 ctx.set_ssl_certificates("client.crt", "client.key")
 ctx.set_will("client/status", "offline", qos = 1, retain = true)
-ctx.setProtocolVersion(mpv5)
 
 await ctx.start()
 await ctx.publish("topic", "payload", qos = 0, retain = false)
@@ -298,13 +296,32 @@ await ctx.disconnect()
 
 `publish()` は nmqtt 風の queue-oriented な意味を維持します。worker queue に command を投入できた時点で戻り、PUBACK は待ちません。
 
-`msgQueue()` は QoS publish completion や subscribe/unsubscribe ack など、未完了の作業数を追跡します。
+`msgQueue()` は QoS publish completion や subscribe/unsubscribe ack、offline queue など、互換 facade で未完了として扱う作業数を返します。
 
-### 拡張API
+`start()` 後の reconnect と offline publish queue は nmqtt 風の利用感に寄せ、compat facade では既定で有効です。
 
-MQTT v5 CONNECT metadata 用に `setConnectProperties()`、PUBLISH metadata 用に `publishV5()`、SUBSCRIBE metadata 用に `subscribeV5()` を追加しています。
+### mosquitto_nim 拡張 API
 
-CONNECT 例:
+以下は nmqtt そのものにはない、mosquitto_nim の拡張 API です。
+
+#### MQTT protocol version
+
+```nim
+ctx.setProtocolVersion(mpv5)
+```
+
+#### TLS trust source / test configuration
+
+```nim
+discard ctx.set_tls_os_certs()
+discard ctx.set_tls_ca("ca.crt")
+discard ctx.set_tls_capath("/etc/ssl/certs")
+ctx.set_tls_insecure(true)  # test only
+```
+
+`set_ssl_certificates(certfile, keyfile)` は互換 API として残しつつ、mosquitto_nim では mTLS client certificate / private key 設定として扱います。公開 CA の broker に接続するだけなら `set_tls_os_certs()` や `set_tls_ca()` を使います。
+
+#### MQTT v5 CONNECT metadata
 
 ```nim
 var connectProps = noConnectProperties()
@@ -315,7 +332,18 @@ discard ctx.setConnectProperties(connectProps)
 ctx.setProtocolVersion(mpv5)
 ```
 
-PUBLISH 例:
+#### MQTT v5 SUBSCRIBE metadata
+
+```nim
+var subProps = noSubscribeProperties()
+subProps.setSubscriptionIdentifier(7)
+subProps.addUserProperty("route", "telemetry")
+
+await ctx.subscribeV5("telemetry/#", subProps, 1) do (topic, message: string):
+  echo topic, ": ", message
+```
+
+#### MQTT v5 PUBLISH metadata
 
 ```nim
 var props = noPublishProperties()
@@ -333,6 +361,25 @@ await ctx.publishV5(
   properties = props,
 )
 ```
+
+#### Reconnect / offline queue policy
+
+```nim
+discard ctx.enableReconnect(initialDelayMs = 1000, maxDelayMs = 30000)
+discard ctx.enableOfflineQueue(maxMessages = 100, maxBytes = 1024 * 1024)
+```
+
+#### 状態・診断情報
+
+```nim
+echo ctx.currentState()
+echo ctx.pendingOperations()
+echo ctx.queueSnapshot()
+echo ctx.lastConnectReasonCode()
+echo ctx.lastConnectProperties()
+```
+
+互換 API と拡張 API の一覧は、今後 `docs/NMQTT_COMPAT.ja.md` のような compatibility matrix として分離する予定です。
 
 ## 6. テスト
 
