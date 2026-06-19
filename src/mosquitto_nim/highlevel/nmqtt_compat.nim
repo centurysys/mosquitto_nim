@@ -50,6 +50,7 @@ type
     willQos: int
     willRetain: bool
     reconnectPolicy: MqttReconnectPolicy
+    offlineQueuePolicy: MqttOfflineQueuePolicy
     connectTimeoutMs: int
     pumpSleepMs: int
     client: MqttClient
@@ -197,6 +198,7 @@ proc newMqttCtx*(clientId: string): MqttCtx =
   result.cleanSession = true
   result.sslOn = false
   result.reconnectPolicy = noReconnect()
+  result.offlineQueuePolicy = noOfflineQueue()
   result.connectTimeoutMs = 5000
   result.pumpSleepMs = 1
   result.pending = emptyPendingOperations()
@@ -293,6 +295,45 @@ proc enableReconnect*(ctx: MqttCtx; initialDelayMs = 1000;
 proc disableReconnect*(ctx: MqttCtx): MqttResult[MqttOk] =
   result = ctx.setReconnectPolicy(noReconnect())
 
+
+proc offlineQueuePolicy*(ctx: MqttCtx): MqttOfflineQueuePolicy =
+  ## Return the offline publish queue policy used for future starts/connects.
+  if ctx.isNil:
+    return noOfflineQueue()
+  result = ctx.offlineQueuePolicy
+
+proc setOfflineQueuePolicy*(ctx: MqttCtx;
+                            policy: MqttOfflineQueuePolicy): MqttResult[MqttOk] =
+  ## Store offline publish queue policy configuration for future starts/connects.
+  ##
+  ## This compatibility API only configures policy. It does not make publish()
+  ## wait for broker acknowledgement and does not enable actual offline queueing
+  ## until the worker queue implementation is added in a later step.
+  if ctx.isNil:
+    return err(invalidState("set nmqtt offline queue policy", "context is nil"))
+
+  let validateRes = validateOfflineQueuePolicy(policy, "set nmqtt offline queue policy")
+  if validateRes.isErr:
+    ctx.setLastError(validateRes.error)
+    return err(validateRes.error)
+
+  ctx.offlineQueuePolicy = policy
+  result = ok(MqttOk())
+
+proc enableOfflineQueue*(ctx: MqttCtx; maxMessages = 100;
+                         maxBytes = 1024 * 1024;
+                         qos0Policy = moqReject): MqttResult[MqttOk] =
+  result = ctx.setOfflineQueuePolicy(
+    mqttOfflineQueuePolicy(
+      maxMessages = maxMessages,
+      maxBytes = maxBytes,
+      qos0Policy = qos0Policy
+    )
+  )
+
+proc disableOfflineQueue*(ctx: MqttCtx): MqttResult[MqttOk] =
+  result = ctx.setOfflineQueuePolicy(noOfflineQueue())
+
 proc lastError*(ctx: MqttCtx): Option[MqttError] =
   if ctx.isNil:
     return none(MqttError)
@@ -319,6 +360,10 @@ proc connect*(ctx: MqttCtx) {.async.} =
   let policyRes = ctx.client.setReconnectPolicy(ctx.reconnectPolicy)
   if policyRes.isErr:
     ctx.raiseCompat(policyRes.error)
+
+  let offlineQueueRes = ctx.client.setOfflineQueuePolicy(ctx.offlineQueuePolicy)
+  if offlineQueueRes.isErr:
+    ctx.raiseCompat(offlineQueueRes.error)
 
   let connectRes = ctx.client.connect(
     ctx.host,

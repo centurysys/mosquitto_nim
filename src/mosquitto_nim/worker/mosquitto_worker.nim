@@ -44,6 +44,7 @@ type
 
   WorkerReconnectState = object
     policy: MqttReconnectPolicy
+    offlineQueuePolicy: MqttOfflineQueuePolicy
     lastConnectCommand: Option[MqttCommand]
     scheduled: bool
     reconnectAtMs: int64
@@ -284,7 +285,14 @@ proc handleCommand(command: sink MqttCommand; running: var bool;
       sendWorkerError(eventQueue, reconnectRes.error, cmd.id)
       return
 
+    let offlineQueueRes = validateOfflineQueuePolicy(cmd.offlineQueuePolicy, "MQTT worker offline queue policy")
+    if offlineQueueRes.isErr:
+      pendingConnectId = 0
+      sendWorkerError(eventQueue, offlineQueueRes.error, cmd.id)
+      return
+
     reconnect.policy = cmd.reconnectPolicy
+    reconnect.offlineQueuePolicy = cmd.offlineQueuePolicy
     reconnect.lastConnectCommand = some(cmd)
     reconnect.explicitDisconnectRequested = false
     reconnect.reconnectApiAvailable = false
@@ -411,7 +419,10 @@ proc workerMain(args: MqttWorkerArgs) {.thread.} =
   var running = true
   var pendingConnectId = 0
   var pendingDisconnectId = 0
-  var reconnect = WorkerReconnectState(policy: noReconnect())
+  var reconnect = WorkerReconnectState(
+    policy: noReconnect(),
+    offlineQueuePolicy: noOfflineQueue()
+  )
   var pendingPublishes = initTable[int, int]()
   var pendingSubscribes = initTable[int, int]()
   var pendingUnsubscribes = initTable[int, int]()

@@ -58,6 +58,28 @@ type
     maxDelayMs*: int
     multiplier*: float
 
+  MqttOfflineQos0Policy* = enum
+    ## Policy for QoS0 publishes while the client is offline/reconnecting.
+    ##
+    ## Step 26 only introduces configuration plumbing. Actual queueing behavior is
+    ## intentionally left for a later step.
+    moqReject
+    moqDropNewest
+    moqDropOldest
+    moqQueue
+
+  MqttOfflineQueuePolicy* = object
+    ## Offline publish queue configuration carried by connect commands.
+    ##
+    ## The default is disabled, so existing publish behavior is unchanged. When
+    ## enabled, later worker steps can use maxMessages/maxBytes and qos0Policy to
+    ## decide whether disconnected publishes should be rejected, dropped, or
+    ## queued.
+    enabled*: bool
+    maxMessages*: int
+    maxBytes*: int
+    qos0Policy*: MqttOfflineQos0Policy
+
   MqttCommand* = object
     ## Command sent to the MQTT worker.
     ##
@@ -71,6 +93,7 @@ type
     keepalive*: int
     protocolVersion*: MqttProtocolVersion
     reconnectPolicy*: MqttReconnectPolicy
+    offlineQueuePolicy*: MqttOfflineQueuePolicy
     username*: string
     password*: string
     tls*: MqttTlsConfig
@@ -199,6 +222,54 @@ proc `$`*(policy: MqttReconnectPolicy): string =
   else:
     result = "reconnect(enabled=false)"
 
+
+# ------------------------------------------------------------------------------
+# Offline queue policy helpers
+# ------------------------------------------------------------------------------
+proc noOfflineQueue*(): MqttOfflineQueuePolicy =
+  result = MqttOfflineQueuePolicy(
+    enabled: false,
+    maxMessages: 0,
+    maxBytes: 0,
+    qos0Policy: moqReject
+  )
+
+proc mqttOfflineQueuePolicy*(maxMessages = 100; maxBytes = 1024 * 1024;
+                             qos0Policy = moqReject): MqttOfflineQueuePolicy =
+  ## Construct an enabled offline publish queue policy.
+  ##
+  ## Validation is performed by validateOfflineQueuePolicy(). Keeping the
+  ## constructor allocation-only lets tests deliberately build invalid values.
+  result = MqttOfflineQueuePolicy(
+    enabled: true,
+    maxMessages: maxMessages,
+    maxBytes: maxBytes,
+    qos0Policy: qos0Policy
+  )
+
+proc validateOfflineQueuePolicy*(policy: MqttOfflineQueuePolicy;
+                                 context = "MQTT offline queue policy"): MqttResult[MqttOk] =
+  ## Validate offline publish queue policy values.
+  ##
+  ## Disabled policies are accepted regardless of limit fields. Enabled policies
+  ## must be bounded so a future offline queue implementation cannot accidentally
+  ## become unbounded by default.
+  if not policy.enabled:
+    return ok(MqttOk())
+
+  if policy.maxMessages <= 0:
+    return err(invalidArgument(context, &"maxMessages must be positive: {policy.maxMessages}"))
+  if policy.maxBytes <= 0:
+    return err(invalidArgument(context, &"maxBytes must be positive: {policy.maxBytes}"))
+
+  result = ok(MqttOk())
+
+proc `$`*(policy: MqttOfflineQueuePolicy): string =
+  if policy.enabled:
+    result = &"offlineQueue(enabled=true, maxMessages={policy.maxMessages}, maxBytes={policy.maxBytes}, qos0Policy={policy.qos0Policy})"
+  else:
+    result = "offlineQueue(enabled=false)"
+
 # ------------------------------------------------------------------------------
 # Pending operation helpers
 # ------------------------------------------------------------------------------
@@ -236,6 +307,7 @@ proc payloadString*(command: MqttCommand): string =
 proc connectCommand*(host: string; port = 1883; keepalive = 60;
                      protocolVersion = mpv311;
                      reconnectPolicy: MqttReconnectPolicy = MqttReconnectPolicy(enabled: false, multiplier: 1.0);
+                     offlineQueuePolicy: MqttOfflineQueuePolicy = MqttOfflineQueuePolicy(enabled: false, qos0Policy: moqReject);
                      username = ""; password = "";
                      tls: MqttTlsConfig = MqttTlsConfig(enabled: false);
                      will: MqttWill = MqttWill(enabled: false, qos: qos0);
@@ -248,6 +320,7 @@ proc connectCommand*(host: string; port = 1883; keepalive = 60;
     keepalive: keepalive,
     protocolVersion: protocolVersion,
     reconnectPolicy: reconnectPolicy,
+    offlineQueuePolicy: offlineQueuePolicy,
     username: username,
     password: password,
     tls: tls,
@@ -415,7 +488,8 @@ proc summary*(command: MqttCommand): string =
     let tls = if command.tls.enabled: ", tls=true" else: ""
     let will = if command.will.enabled: ", will=true" else: ""
     let reconnect = if command.reconnectPolicy.enabled: ", reconnect=true" else: ""
-    result = &"{command.kind}(id={command.id}, host={command.host}, port={command.port}, protocol={command.protocolVersion}{auth}{tls}{will}{reconnect})"
+    let offlineQueue = if command.offlineQueuePolicy.enabled: ", offlineQueue=true" else: ""
+    result = &"{command.kind}(id={command.id}, host={command.host}, port={command.port}, protocol={command.protocolVersion}{auth}{tls}{will}{reconnect}{offlineQueue})"
   of mckPublish:
     let props = if command.properties.len > 0: &", properties={command.properties.len}" else: ""
     result = &"{command.kind}(id={command.id}, topic={command.topic}, payloadLen={command.payload.len}, qos={command.qos}, retain={command.retain}{props})"

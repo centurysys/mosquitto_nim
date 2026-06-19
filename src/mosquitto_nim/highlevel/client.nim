@@ -44,6 +44,7 @@ type
     state: MqttConnectionState
     pending: MqttPendingOperations
     reconnectPolicy: MqttReconnectPolicy
+    offlineQueuePolicy: MqttOfflineQueuePolicy
     closed: bool
 
 # ------------------------------------------------------------------------------
@@ -148,6 +149,7 @@ proc startMqttClient*(clientId = ""; cleanSession = true;
   client.state = mcsDisconnected
   client.pending = emptyPendingOperations()
   client.reconnectPolicy = noReconnect()
+  client.offlineQueuePolicy = noOfflineQueue()
   client.closed = false
   result = ok(client)
 
@@ -221,6 +223,45 @@ proc enableReconnect*(client: MqttClient; initialDelayMs = 1000;
 
 proc disableReconnect*(client: MqttClient): MqttResult[MqttOk] =
   result = client.setReconnectPolicy(noReconnect())
+
+
+proc offlineQueuePolicy*(client: MqttClient): MqttOfflineQueuePolicy {.inline.} =
+  ## Return the offline publish queue policy attached to future connect commands.
+  if client.isNil:
+    return noOfflineQueue()
+  result = client.offlineQueuePolicy
+
+proc setOfflineQueuePolicy*(client: MqttClient;
+                            policy: MqttOfflineQueuePolicy): MqttResult[MqttOk] =
+  ## Store an offline publish queue policy for future connect commands.
+  ##
+  ## Step 26 only wires the policy through the public API and worker connect
+  ## configuration. Actual disconnected publish queueing remains disabled until
+  ## a later implementation step.
+  let openRes = client.ensureOpen("set MQTT offline queue policy")
+  if openRes.isErr:
+    return err(openRes.error)
+
+  let validateRes = validateOfflineQueuePolicy(policy, "set MQTT offline queue policy")
+  if validateRes.isErr:
+    return err(validateRes.error)
+
+  client.offlineQueuePolicy = policy
+  result = ok(MqttOk())
+
+proc enableOfflineQueue*(client: MqttClient; maxMessages = 100;
+                         maxBytes = 1024 * 1024;
+                         qos0Policy = moqReject): MqttResult[MqttOk] =
+  result = client.setOfflineQueuePolicy(
+    mqttOfflineQueuePolicy(
+      maxMessages = maxMessages,
+      maxBytes = maxBytes,
+      qos0Policy = qos0Policy
+    )
+  )
+
+proc disableOfflineQueue*(client: MqttClient): MqttResult[MqttOk] =
+  result = client.setOfflineQueuePolicy(noOfflineQueue())
 
 proc joinMqttClient*(client: MqttClient): MqttResult[MqttOk] =
   ## Join the worker thread after a Stop command has been processed.
@@ -330,6 +371,7 @@ proc connect*(client: MqttClient; host: string; port = 1883;
               tls: MqttTlsConfig = MqttTlsConfig(enabled: false);
               will: MqttWill = MqttWill(enabled: false, qos: qos0)): MqttResult[int] =
   let policy = if client.isNil: noReconnect() else: client.reconnectPolicy
+  let offlinePolicy = if client.isNil: noOfflineQueue() else: client.offlineQueuePolicy
   var cmd = connectCommand(
     host,
     port = port,
@@ -339,7 +381,8 @@ proc connect*(client: MqttClient; host: string; port = 1883;
     password = password,
     tls = tls,
     will = will,
-    reconnectPolicy = policy
+    reconnectPolicy = policy,
+    offlineQueuePolicy = offlinePolicy
   )
   result = client.sendClientCommand(move cmd, "connect MQTT client")
   if result.isOk:
