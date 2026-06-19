@@ -329,18 +329,48 @@ export MOSQUITTO_NIM_TEST_TLS_PORT=8883
 export MOSQUITTO_NIM_TEST_TLS_CAFILE="$HOME/tmp/mosquitto-tls-test/ca.crt"
 ```
 
-mTLS なら client certificate / key も追加します。
+mTLS は、通常 TLS listener とは別の env で有効化します。
+
+`require_certificate true` の listener では client certificate が必須になるため、client certificate なしの TLS test と同じ port で走らせると、通常 TLS test が失敗します。そのため、通常 TLS は `MOSQUITTO_NIM_TEST_TLS_BROKER`、mTLS は `MOSQUITTO_NIM_TEST_MTLS_BROKER` で分けています。
 
 ```bash
-export MOSQUITTO_NIM_TEST_TLS_BROKER=1
-export MOSQUITTO_NIM_TEST_TLS_HOST=localhost
-export MOSQUITTO_NIM_TEST_TLS_PORT=8884
+export MOSQUITTO_NIM_TEST_MTLS_BROKER=1
+export MOSQUITTO_NIM_TEST_MTLS_HOST=localhost
+export MOSQUITTO_NIM_TEST_MTLS_PORT=8884
 export MOSQUITTO_NIM_TEST_TLS_CAFILE="$HOME/tmp/mosquitto-tls-test/ca.crt"
 export MOSQUITTO_NIM_TEST_TLS_CERTFILE="$HOME/tmp/mosquitto-tls-test/client.crt"
 export MOSQUITTO_NIM_TEST_TLS_KEYFILE="$HOME/tmp/mosquitto-tls-test/client.key"
 ```
 
-テスト実装が入った後は、次のように実行する想定です。
+通常 TLS と mTLS の両方を同時に確認する場合は、両方を有効化します。
+
+```bash
+export MOSQUITTO_NIM_TEST_TLS_BROKER=1
+export MOSQUITTO_NIM_TEST_TLS_HOST=localhost
+export MOSQUITTO_NIM_TEST_TLS_PORT=8883
+
+export MOSQUITTO_NIM_TEST_MTLS_BROKER=1
+export MOSQUITTO_NIM_TEST_MTLS_HOST=localhost
+export MOSQUITTO_NIM_TEST_MTLS_PORT=8884
+
+export MOSQUITTO_NIM_TEST_TLS_CAFILE="$HOME/tmp/mosquitto-tls-test/ca.crt"
+export MOSQUITTO_NIM_TEST_TLS_CERTFILE="$HOME/tmp/mosquitto-tls-test/client.crt"
+export MOSQUITTO_NIM_TEST_TLS_KEYFILE="$HOME/tmp/mosquitto-tls-test/client.key"
+```
+
+既定では MQTT v5 で接続します。MQTT v3.1.1 経路を確認したい場合は次を指定します。
+
+```bash
+export MOSQUITTO_NIM_TEST_TLS_PROTOCOL=311
+```
+
+証明書の SAN と接続 host が一致しない状態を、開発時だけ一時的に許容したい場合は次を指定します。
+
+```bash
+export MOSQUITTO_NIM_TEST_TLS_INSECURE=1
+```
+
+設定後、通常どおり実行します。
 
 ```bash
 nimble test

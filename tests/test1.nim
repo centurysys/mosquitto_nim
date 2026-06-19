@@ -2769,3 +2769,207 @@ when getEnv("MOSQUITTO_NIM_TEST_BROKER") == "1":
         return sawPendingNonZero and sawPendingZero and sawCompleted
 
       check waitFor scenario()
+
+
+when (getEnv("MOSQUITTO_NIM_TEST_TLS_BROKER") == "1") or (getEnv("MOSQUITTO_NIM_TEST_MTLS_BROKER") == "1"):
+  proc tlsProtocolVersionFromEnv(): MqttProtocolVersion =
+    let value = getEnv("MOSQUITTO_NIM_TEST_TLS_PROTOCOL", "5").toLowerAscii()
+    if value in ["311", "3.1.1", "v311", "mqtt311", "mqttv311"]:
+      return mpv311
+    result = mpv5
+
+  proc tlsInsecureFromEnv(): bool =
+    let value = getEnv("MOSQUITTO_NIM_TEST_TLS_INSECURE", "0").toLowerAscii()
+    result = value in ["1", "true", "yes", "on"]
+
+  proc waitForTlsEvent(client: MqttClient; maxRounds: int;
+                       wantedKind: MqttEventKind; commandId = -1): Future[Option[MqttEvent]] {.async.} =
+    for _ in 0 ..< maxRounds:
+      let drainRes = client.drainEvents()
+      check drainRes.isOk
+      if drainRes.isOk:
+        for event in drainRes.get():
+          if event.kind == mevError:
+            checkpoint event.summary()
+          if event.kind == wantedKind:
+            if commandId >= 0 and event.commandId != commandId:
+              continue
+            return some(event)
+      await sleepAsync(10)
+
+    result = none(MqttEvent)
+
+  proc stopTlsClient(client: MqttClient): Future[void] {.async.} =
+    if client.isNil:
+      return
+
+    let disconnectRes = client.disconnect()
+    if disconnectRes.isOk:
+      discard await waitForTlsEvent(client, 200, mevDisconnected, disconnectRes.get())
+
+    let stopRes = client.requestStop()
+    if stopRes.isOk:
+      discard await waitForTlsEvent(client, 200, mevStopped, stopRes.get())
+
+    check client.joinMqttClient().isOk
+
+  proc exchangeOneTlsMessage(client: MqttClient; topic: string;
+                             payload: string): Future[bool] {.async.} =
+    let subIdRes = client.subscribe(topic, qos1)
+    check subIdRes.isOk
+    if subIdRes.isErr:
+      return false
+
+    let subEvent = await waitForTlsEvent(client, 300, mevSubscribed, subIdRes.get())
+    check subEvent.isSome
+    if subEvent.isNone:
+      return false
+
+    let publishIdRes = client.publish(topic, payload, qos1, retain = false)
+    check publishIdRes.isOk
+    if publishIdRes.isErr:
+      return false
+
+    var sawMessage = false
+    var sawPublishCompleted = false
+    for _ in 0 ..< 400:
+      let drainRes = client.drainEvents()
+      check drainRes.isOk
+      if drainRes.isOk:
+        for event in drainRes.get():
+          case event.kind
+          of mevMessageReceived:
+            if event.message.topic == topic and event.message.payloadString() == payload:
+              sawMessage = true
+          of mevPublishCompleted:
+            if event.commandId == publishIdRes.get():
+              sawPublishCompleted = true
+          of mevError:
+            checkpoint event.summary()
+          else:
+            discard
+
+      if sawMessage and sawPublishCompleted:
+        break
+      await sleepAsync(10)
+
+    check sawMessage
+    check sawPublishCompleted
+    result = sawMessage and sawPublishCompleted
+
+when getEnv("MOSQUITTO_NIM_TEST_TLS_BROKER") == "1":
+  suite "mosquitto_nim TLS broker test":
+    test "highlevel client exchanges messages over TLS with explicit CA file":
+      proc scenario(): Future[bool] {.async.} =
+        let host = getEnv("MOSQUITTO_NIM_TEST_TLS_HOST", "localhost")
+        let port = parseInt(getEnv("MOSQUITTO_NIM_TEST_TLS_PORT", "8883"))
+        let cafile = getEnv("MOSQUITTO_NIM_TEST_TLS_CAFILE", "")
+        let protocolVersion = tlsProtocolVersionFromEnv()
+        let topic = "mosquitto_nim/tls/ca/" & $getTime().toUnix() & "_" & $getCurrentProcessId()
+        let payload = "hello over tls"
+
+        check cafile.len > 0
+        check fileExists(cafile)
+        if cafile.len == 0 or not fileExists(cafile):
+          return false
+
+        let clientRes = startMqttClient(
+          "mosquitto_nim_tls_ca_file",
+          eventQueueLen = 128,
+          loopTimeoutMs = 10,
+          pollMs = 1
+        )
+        check clientRes.isOk
+        if clientRes.isErr:
+          return false
+
+        let client = clientRes.get()
+        let tls = mqttTlsWithCa(cafile, insecure = tlsInsecureFromEnv())
+        let connectIdRes = client.connect(
+          host,
+          port = port,
+          keepalive = 30,
+          protocolVersion = protocolVersion,
+          tls = tls
+        )
+        check connectIdRes.isOk
+        if connectIdRes.isErr:
+          await stopTlsClient(client)
+          return false
+
+        let connected = await waitForTlsEvent(client, 400, mevConnected, connectIdRes.get())
+        check connected.isSome
+        if connected.isNone:
+          await stopTlsClient(client)
+          return false
+
+        let exchanged = await exchangeOneTlsMessage(client, topic, payload)
+        await stopTlsClient(client)
+        result = exchanged
+
+      check waitFor scenario()
+
+when getEnv("MOSQUITTO_NIM_TEST_MTLS_BROKER") == "1":
+  suite "mosquitto_nim mTLS broker test":
+    test "highlevel client exchanges messages over mTLS with client certificate":
+      proc scenario(): Future[bool] {.async.} =
+        let host = getEnv("MOSQUITTO_NIM_TEST_MTLS_HOST", getEnv("MOSQUITTO_NIM_TEST_TLS_HOST", "localhost"))
+        let port = parseInt(getEnv("MOSQUITTO_NIM_TEST_MTLS_PORT", getEnv("MOSQUITTO_NIM_TEST_TLS_PORT", "8884")))
+        let cafile = getEnv("MOSQUITTO_NIM_TEST_TLS_CAFILE", "")
+        let certfile = getEnv("MOSQUITTO_NIM_TEST_TLS_CERTFILE", "")
+        let keyfile = getEnv("MOSQUITTO_NIM_TEST_TLS_KEYFILE", "")
+        let protocolVersion = tlsProtocolVersionFromEnv()
+        let topic = "mosquitto_nim/tls/mtls/" & $getTime().toUnix() & "_" & $getCurrentProcessId()
+        let payload = "hello over mtls"
+
+        check cafile.len > 0
+        check certfile.len > 0
+        check keyfile.len > 0
+        check fileExists(cafile)
+        check fileExists(certfile)
+        check fileExists(keyfile)
+        if cafile.len == 0 or certfile.len == 0 or keyfile.len == 0 or
+           not fileExists(cafile) or not fileExists(certfile) or not fileExists(keyfile):
+          return false
+
+        let clientRes = startMqttClient(
+          "mosquitto_nim_tls_client_cert",
+          eventQueueLen = 128,
+          loopTimeoutMs = 10,
+          pollMs = 1
+        )
+        check clientRes.isOk
+        if clientRes.isErr:
+          return false
+
+        let client = clientRes.get()
+        let tls = mqttTlsClientCertificate(
+          certfile,
+          keyfile,
+          cafile = cafile,
+          useOsTrustStore = false,
+          insecure = tlsInsecureFromEnv()
+        )
+        let connectIdRes = client.connect(
+          host,
+          port = port,
+          keepalive = 30,
+          protocolVersion = protocolVersion,
+          tls = tls
+        )
+        check connectIdRes.isOk
+        if connectIdRes.isErr:
+          await stopTlsClient(client)
+          return false
+
+        let connected = await waitForTlsEvent(client, 400, mevConnected, connectIdRes.get())
+        check connected.isSome
+        if connected.isNone:
+          await stopTlsClient(client)
+          return false
+
+        let exchanged = await exchangeOneTlsMessage(client, topic, payload)
+        await stopTlsClient(client)
+        result = exchanged
+
+      check waitFor scenario()
