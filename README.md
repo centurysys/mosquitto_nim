@@ -41,6 +41,7 @@ Currently implemented:
   - Message Expiry Interval
   - Content Type
   - Payload Format Indicator
+- Typed MQTT v5 publish property container (`MqttPublishProperties`)
 
 ## Requirements
 
@@ -115,18 +116,19 @@ proc main() {.async.} =
   await ctx.subscribe("demo/v5", 0) do (topic, message: string):
     echo topic, ": ", message
 
+  var props = noPublishProperties()
+  props.addUserProperty("trace-id", "abc123")
+  props.setResponseTopic("demo/response")
+  props.setCorrelationData(@[1'u8, 2, 3, 4])
+  props.setMessageExpiryInterval(60'u32)
+  props.setContentType("text/plain")
+  props.setPayloadFormatIndicator(mpfiUtf8)
+
   await ctx.publishV5(
     topic = "demo/v5",
-    message = "hello with properties",
+    message = "hello with typed properties",
     qos = 0,
-    properties = @[
-      userProperty("trace-id", "abc123"),
-      responseTopic("demo/response"),
-      correlationData(@[1'u8, 2, 3, 4]),
-      messageExpiryInterval(60'u32),
-      contentType("text/plain"),
-      payloadFormatIndicatorUtf8(),
-    ],
+    properties = props,
   )
 
   await sleepAsync(500)

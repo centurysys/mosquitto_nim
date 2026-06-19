@@ -499,6 +499,25 @@ proc publishV5*(ctx: MqttCtx; topic: string; message: string; qos = 0;
   if mqttQos != qos0:
     inc ctx.pendingCount
 
+proc publishV5*(ctx: MqttCtx; topic: string; message: string;
+                properties: MqttPublishProperties;
+                qos = 0; retain = false) {.async.} =
+  ## Publish a message with typed MQTT v5 PUBLISH properties.
+  ##
+  ## This extension overload keeps the nmqtt-compatible queue-oriented publish
+  ## timing while avoiding generic property containers in new code.
+  ctx.requireCtx("publish MQTT v5 message")
+  if not ctx.started or ctx.client.isNil:
+    await ctx.start()
+
+  let mqttQos = ctx.qosFromInt(qos, "publish MQTT v5 message")
+  let publishRes = ctx.client.publishV5(topic, message, properties = properties, qos = mqttQos, retain = retain)
+  if publishRes.isErr:
+    ctx.raiseCompat(publishRes.error)
+
+  if mqttQos != qos0:
+    inc ctx.pendingCount
+
 proc subscribe*(ctx: MqttCtx; topic: string; qos: int;
                 callback: PubCallback): Future[void] {.async.} =
   ctx.requireCtx("subscribe MQTT topic")

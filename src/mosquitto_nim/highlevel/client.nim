@@ -458,6 +458,23 @@ proc publishV5*(client: MqttClient; topic: string; payload: string;
   var cmd = publishV5Command(topic, payload, qos = qos, retain = retain, properties = properties)
   result = client.sendClientCommand(move cmd, "publish MQTT v5 message")
 
+proc publishV5*(client: MqttClient; topic: string; payload: openArray[byte];
+                properties: MqttPublishProperties;
+                qos = qos0; retain = false): MqttResult[int] =
+  ## Queue a PUBLISH command with typed MQTT v5 PUBLISH properties.
+  ##
+  ## This overload is the preferred highlevel API for new code because it keeps
+  ## PUBLISH-specific properties separate from future CONNECT/SUBSCRIBE property
+  ## containers.
+  var cmd = publishV5Command(topic, payload, qos = qos, retain = retain, properties = properties)
+  result = client.sendClientCommand(move cmd, "publish MQTT v5 message")
+
+proc publishV5*(client: MqttClient; topic: string; payload: string;
+                properties: MqttPublishProperties;
+                qos = qos0; retain = false): MqttResult[int] =
+  var cmd = publishV5Command(topic, payload, qos = qos, retain = retain, properties = properties)
+  result = client.sendClientCommand(move cmd, "publish MQTT v5 message")
+
 proc subscribe*(client: MqttClient; topicFilter: string; qos = qos0): MqttResult[int] =
   var cmd = subscribeCommand(topicFilter, qos = qos)
   result = client.sendClientCommand(move cmd, "subscribe MQTT topic")

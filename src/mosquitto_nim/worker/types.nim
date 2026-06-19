@@ -397,6 +397,17 @@ proc publishV5Command*(topic: string; payload: string; qos = qos0;
                        properties: MqttProperties = @[]): MqttCommand =
   result = publishV5Command(topic, bytesFromString(payload), qos = qos, retain = retain, id = id, properties = properties)
 
+proc publishV5Command*(topic: string; payload: openArray[byte];
+                       properties: MqttPublishProperties;
+                       qos = qos0; retain = false; id = 0): MqttCommand =
+  ## Construct a PUBLISH command carrying typed MQTT v5 PUBLISH properties.
+  result = publishV5Command(topic, payload, qos = qos, retain = retain, id = id, properties = properties.toMqttProperties())
+
+proc publishV5Command*(topic: string; payload: string;
+                       properties: MqttPublishProperties;
+                       qos = qos0; retain = false; id = 0): MqttCommand =
+  result = publishV5Command(topic, bytesFromString(payload), qos = qos, retain = retain, id = id, properties = properties)
+
 proc subscribeCommand*(topicFilter: string; qos = qos0; id = 0): MqttCommand =
   result = MqttCommand(
     id: id,

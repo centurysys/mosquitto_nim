@@ -77,7 +77,15 @@ Currently supported:
 - `payloadFormatIndicatorUtf8()`
 - `payloadFormatIndicatorUnspecified()`
 
-These can be passed to `publishV5()` through highlevel or compatibility APIs.
+For new code, convert these helpers to `MqttPublishProperties` with `mqttPublishProperties(...)` and pass the typed container to `publishV5()`. The older `MqttProperties` overload remains available for compatibility.
+
+Typed containers added for API separation:
+
+- `MqttConnectProperties`
+- `MqttPublishProperties`
+- `MqttSubscribeProperties`
+
+Only `MqttPublishProperties` is wired to publish APIs at this step. CONNECT and SUBSCRIBE property transmission will be added separately.
 
 ## 2. Worker API
 
@@ -247,18 +255,19 @@ subscribe/unsubscribe acknowledgements.
 Example:
 
 ```nim
+var props = noPublishProperties()
+props.addUserProperty("trace-id", "abc123")
+props.setResponseTopic("rpc/response/client1")
+props.setCorrelationData(@[0x01'u8, 0x02, 0x03])
+props.setMessageExpiryInterval(60'u32)
+props.setContentType("text/plain")
+props.setPayloadFormatIndicator(mpfiUtf8)
+
 await ctx.publishV5(
   topic = "rpc/request",
   message = "payload",
   qos = 1,
-  properties = @[
-    userProperty("trace-id", "abc123"),
-    responseTopic("rpc/response/client1"),
-    correlationData(@[0x01'u8, 0x02, 0x03]),
-    messageExpiryInterval(60'u32),
-    contentType("text/plain"),
-    payloadFormatIndicatorUtf8(),
-  ],
+  properties = props,
 )
 ```
 

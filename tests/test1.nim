@@ -1252,6 +1252,71 @@ suite "mosquitto_nim MQTT v5 property helpers":
     check cmd.properties[4].value == "application/json"
     check cmd.properties[5].intValue == 1'u32
 
+  test "typed MQTT v5 publish properties convert to generic properties":
+    let typedRes = mqttPublishProperties(
+      userProperty("trace-id", "step29"),
+      responseTopic("mosquitto_nim/step29/reply"),
+      correlationData("corr-step29"),
+      messageExpiryInterval(90'u32),
+      contentType("application/json"),
+      payloadFormatIndicatorUtf8()
+    )
+    check typedRes.isOk
+    if typedRes.isOk:
+      let typed = typedRes.get()
+      check typed.userProperties.len == 1
+      check typed.userProperties[0][0] == "trace-id"
+      check typed.userProperties[0][1] == "step29"
+      check typed.responseTopic.get() == "mosquitto_nim/step29/reply"
+      check typed.correlationData.get().len == "corr-step29".len
+      check typed.messageExpiryInterval.get() == 90'u32
+      check typed.contentType.get() == "application/json"
+      check typed.payloadFormatIndicator.get() == mpfiUtf8
+
+      let generic = typed.toMqttProperties()
+      check generic.len == 6
+      check generic[0].kind == mpUserProperty
+      check generic[1].kind == mpResponseTopic
+      check generic[2].kind == mpCorrelationData
+      check generic[3].kind == mpMessageExpiryInterval
+      check generic[4].kind == mpContentType
+      check generic[5].kind == mpPayloadFormatIndicator
+
+      let cmd = publishV5Command(
+        "mosquitto_nim/step29/typed",
+        "hello-typed",
+        qos = qos1,
+        properties = typed
+      )
+      check cmd.properties.len == 6
+      check cmd.properties[1].value == "mosquitto_nim/step29/reply"
+
+  test "typed MQTT v5 publish properties reject duplicate single-instance properties":
+    check mqttPublishProperties(responseTopic("a"), responseTopic("b")).isErr
+    check mqttPublishProperties(correlationData("a"), correlationData("b")).isErr
+    check mqttPublishProperties(messageExpiryInterval(1'u32), messageExpiryInterval(2'u32)).isErr
+    check mqttPublishProperties(contentType("text/plain"), contentType("application/json")).isErr
+    check mqttPublishProperties(payloadFormatIndicatorUtf8(), payloadFormatIndicatorUnspecified()).isErr
+    check mqttPublishProperties(userProperty("a", "1"), userProperty("b", "2")).isOk
+
+  test "typed MQTT v5 publish properties can be built mutably":
+    var typed = noPublishProperties()
+    typed.addUserProperty("trace-id", "step29-mutable")
+    typed.setResponseTopic("mosquitto_nim/step29/mutable/reply")
+    typed.setCorrelationData("corr-step29-mutable")
+    typed.setMessageExpiryInterval(120'u32)
+    typed.setContentType("text/plain")
+    typed.setPayloadFormatIndicator(mpfiUtf8)
+
+    let generic = typed.toMqttProperties()
+    check generic.len == 6
+    check generic[0].name == "trace-id"
+    check generic[1].value == "mosquitto_nim/step29/mutable/reply"
+    check generic[2].propertyDataString() == "corr-step29-mutable"
+    check generic[3].intValue == 120'u32
+    check generic[4].value == "text/plain"
+    check generic[5].intValue == 1'u32
+
   test "supported MQTT v5 publish properties build into libmosquitto properties":
     let props = @[
       userProperty("trace-id", "step28"),

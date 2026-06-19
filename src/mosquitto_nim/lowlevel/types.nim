@@ -1,6 +1,6 @@
 # Destination: src/mosquitto_nim/lowlevel/types.nim
 
-import std/strformat
+import std/[options, strformat]
 
 import results
 
@@ -80,6 +80,39 @@ type
     intValue*: uint32
 
   MqttProperties* = seq[MqttProperty]
+
+  MqttConnectProperties* = object
+    ## Typed MQTT v5 CONNECT properties.
+    ##
+    ## This is an API-level container for future CONNECT property plumbing.
+    ## Existing connect paths still do not send MQTT v5 CONNECT properties yet.
+    sessionExpiryInterval*: Option[uint32]
+    receiveMaximum*: Option[uint16]
+    maximumPacketSize*: Option[uint32]
+    userProperties*: seq[(string, string)]
+
+  MqttPublishProperties* = object
+    ## Typed MQTT v5 PUBLISH properties.
+    ##
+    ## This separates properties that are valid for PUBLISH packets from the
+    ## lower-level generic MqttProperties representation.  Conversion back to
+    ## MqttProperties happens at the worker/lowlevel boundary so existing code
+    ## can continue using the generic representation.
+    userProperties*: seq[(string, string)]
+    responseTopic*: Option[string]
+    correlationData*: Option[seq[byte]]
+    messageExpiryInterval*: Option[uint32]
+    contentType*: Option[string]
+    payloadFormatIndicator*: Option[MqttPayloadFormatIndicator]
+
+  MqttSubscribeProperties* = object
+    ## Typed MQTT v5 SUBSCRIBE properties.
+    ##
+    ## This is an API-level container for future SUBSCRIBE property plumbing.
+    ## Existing subscribe paths still do not send MQTT v5 SUBSCRIBE properties
+    ## yet.
+    subscriptionIdentifier*: Option[int]
+    userProperties*: seq[(string, string)]
 
   MqttMessage* = object
     ## Nim-owned MQTT message.
@@ -265,6 +298,121 @@ proc payloadFormatIndicatorUtf8*(): MqttProperty =
 proc payloadFormatIndicatorUnspecified*(): MqttProperty =
   ## Construct Payload Format Indicator = unspecified/binary payload.
   result = payloadFormatIndicator(mpfiUnspecified)
+
+# ------------------------------------------------------------------------------
+# Typed MQTT v5 property containers
+# ------------------------------------------------------------------------------
+proc noConnectProperties*(): MqttConnectProperties =
+  ## Construct an empty typed MQTT v5 CONNECT property set.
+  result = MqttConnectProperties()
+
+proc noPublishProperties*(): MqttPublishProperties =
+  ## Construct an empty typed MQTT v5 PUBLISH property set.
+  result = MqttPublishProperties()
+
+proc noSubscribeProperties*(): MqttSubscribeProperties =
+  ## Construct an empty typed MQTT v5 SUBSCRIBE property set.
+  result = MqttSubscribeProperties()
+
+proc toMqttProperties*(properties: MqttPublishProperties): MqttProperties =
+  ## Convert typed PUBLISH properties to the generic lowlevel representation.
+  ##
+  ## This conversion is allocation-only. Topic/string/value validation still
+  ## happens in buildMosquittoProperties(), where libmosquitto property lists are
+  ## actually created.
+  result = @[]
+
+  for item in properties.userProperties:
+    result.add(userProperty(item[0], item[1]))
+
+  if properties.responseTopic.isSome:
+    result.add(responseTopic(properties.responseTopic.get()))
+
+  if properties.correlationData.isSome:
+    result.add(correlationData(properties.correlationData.get()))
+
+  if properties.messageExpiryInterval.isSome:
+    result.add(messageExpiryInterval(properties.messageExpiryInterval.get()))
+
+  if properties.contentType.isSome:
+    result.add(contentType(properties.contentType.get()))
+
+  if properties.payloadFormatIndicator.isSome:
+    result.add(payloadFormatIndicator(properties.payloadFormatIndicator.get()))
+
+proc buildMqttPublishProperties(properties: openArray[MqttProperty]): MqttResult[MqttPublishProperties] =
+  var typed = noPublishProperties()
+
+  for property in properties:
+    case property.kind
+    of mpUserProperty:
+      typed.userProperties.add((property.name, property.value))
+    of mpResponseTopic:
+      if typed.responseTopic.isSome:
+        return err(invalidArgument("MQTT publish properties", "Response Topic appears more than once"))
+      typed.responseTopic = some(property.value)
+    of mpCorrelationData:
+      if typed.correlationData.isSome:
+        return err(invalidArgument("MQTT publish properties", "Correlation Data appears more than once"))
+      typed.correlationData = some(property.data)
+    of mpMessageExpiryInterval:
+      if typed.messageExpiryInterval.isSome:
+        return err(invalidArgument("MQTT publish properties", "Message Expiry Interval appears more than once"))
+      typed.messageExpiryInterval = some(property.intValue)
+    of mpContentType:
+      if typed.contentType.isSome:
+        return err(invalidArgument("MQTT publish properties", "Content Type appears more than once"))
+      typed.contentType = some(property.value)
+    of mpPayloadFormatIndicator:
+      if typed.payloadFormatIndicator.isSome:
+        return err(invalidArgument("MQTT publish properties", "Payload Format Indicator appears more than once"))
+      let indicatorRes = toMqttPayloadFormatIndicator(property.intValue)
+      if indicatorRes.isErr:
+        return err(indicatorRes.error)
+      typed.payloadFormatIndicator = some(indicatorRes.get())
+    of mpUnknown:
+      return err(invalidArgument("MQTT publish properties", "unknown property is not valid for PUBLISH"))
+
+  result = ok(typed)
+
+proc mqttPublishProperties*(properties: openArray[MqttProperty]): MqttResult[MqttPublishProperties] =
+  ## Convert generic MQTT v5 properties into a typed PUBLISH property set.
+  ##
+  ## User Property may appear multiple times. The other currently supported
+  ## PUBLISH properties are single-instance and are rejected if duplicated.
+  result = buildMqttPublishProperties(properties)
+
+proc mqttPublishProperties*(properties: varargs[MqttProperty]): MqttResult[MqttPublishProperties] =
+  ## Varargs convenience overload for typed MQTT v5 PUBLISH properties.
+  result = buildMqttPublishProperties(properties)
+
+proc addUserProperty*(properties: var MqttPublishProperties; name, value: string) =
+  ## Add a User Property to a typed PUBLISH property set.
+  properties.userProperties.add((name, value))
+
+proc setResponseTopic*(properties: var MqttPublishProperties; topic: string) =
+  ## Set the Response Topic in a typed PUBLISH property set.
+  properties.responseTopic = some(topic)
+
+proc setCorrelationData*(properties: var MqttPublishProperties; data: openArray[byte]) =
+  ## Set binary Correlation Data in a typed PUBLISH property set.
+  properties.correlationData = some(@data)
+
+proc setCorrelationData*(properties: var MqttPublishProperties; data: string) =
+  ## Set textual Correlation Data in a typed PUBLISH property set.
+  properties.correlationData = some(bytesFromString(data))
+
+proc setMessageExpiryInterval*(properties: var MqttPublishProperties; seconds: uint32) =
+  ## Set Message Expiry Interval in a typed PUBLISH property set.
+  properties.messageExpiryInterval = some(seconds)
+
+proc setContentType*(properties: var MqttPublishProperties; value: string) =
+  ## Set Content Type in a typed PUBLISH property set.
+  properties.contentType = some(value)
+
+proc setPayloadFormatIndicator*(properties: var MqttPublishProperties; indicator: MqttPayloadFormatIndicator) =
+  ## Set Payload Format Indicator in a typed PUBLISH property set.
+  properties.payloadFormatIndicator = some(indicator)
 
 proc hasProperties*(properties: MqttProperties): bool {.inline.} =
   result = properties.len > 0
