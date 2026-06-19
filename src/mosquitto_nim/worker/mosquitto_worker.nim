@@ -1,6 +1,6 @@
 # Destination: src/mosquitto_nim/worker/mosquitto_worker.nim
 
-import std/[os, options, strformat, tables, typedthreads]
+import std/[os, options, tables, typedthreads]
 
 import results
 import threadtools
@@ -389,6 +389,20 @@ proc tryReceiveEvent*(worker: MqttWorker; event: var MqttEvent): MqttResult[bool
     return err(queueError("receive MQTT worker event", recvRes.error))
 
   result = ok(recvRes.get())
+
+
+proc eventQueueForAsyncBridge*(worker: MqttWorker): MqttResult[ThreadQueue[MqttEvent]] =
+  ## Return the worker event queue for highlevel asyncdispatch bridging.
+  ##
+  ## This is intentionally narrower than exposing the libmosquitto handle.  The
+  ## queue is receive-side state used by the highlevel bridge; callers must not
+  ## send arbitrary events into it.
+  if worker.isNil:
+    return err(invalidState("get MQTT worker event queue", "worker is nil"))
+  if worker.eventQueue.isNil:
+    return err(invalidState("get MQTT worker event queue", "event queue is nil"))
+
+  result = ok(worker.eventQueue)
 
 proc closeQueues(worker: MqttWorker) =
   if worker.isNil:

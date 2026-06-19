@@ -1,12 +1,13 @@
 # Destination: tests/test1.nim
 
-import std/[options, os, strutils, times, unittest]
+import std/[asyncdispatch, options, os, strutils, times, unittest]
 
 import results
 
 import mosquitto_nim
 import mosquitto_nim/worker/types
 import mosquitto_nim/worker/mosquitto_worker
+import mosquitto_nim/highlevel/async_bridge
 import mosquitto_nim/lowlevel/bridge
 import mosquitto_nim/lowlevel/bindings/c_api
 
@@ -203,6 +204,76 @@ suite "mosquitto_nim worker lifecycle":
 
       check sawError
       check sawStopped
+      check worker.joinMqttWorker().isOk
+
+
+suite "mosquitto_nim highlevel async bridge":
+  test "async bridge can await worker stopped event":
+    proc scenario(): Future[bool] {.async.} =
+      let workerRes = startMqttWorker("mosquitto_nim_step9_async_bridge")
+      check workerRes.isOk
+      if workerRes.isErr:
+        return false
+
+      let worker = workerRes.get()
+      let bridgeRes = newMqttAsyncBridge(worker, pollMs = 1)
+      check bridgeRes.isOk
+      if bridgeRes.isErr:
+        discard worker.requestStop(id = 302)
+        discard worker.joinMqttWorker()
+        return false
+
+      let bridge = bridgeRes.get()
+      check worker.requestStop(id = 301).isOk
+
+      var sawStopped = false
+      for _ in 0 ..< 100:
+        let eventRes = await bridge.nextEvent()
+        check eventRes.isOk
+        if eventRes.isErr:
+          break
+
+        let event = eventRes.get()
+        if event.kind == mevStopped and event.commandId == 301:
+          sawStopped = true
+          break
+
+      bridge.close()
+      check bridge.isClosed
+      check worker.joinMqttWorker().isOk
+      return sawStopped
+
+    check waitFor scenario()
+
+  test "async bridge can drain queued events without waiting":
+    let workerRes = startMqttWorker("mosquitto_nim_step9_async_drain")
+    check workerRes.isOk
+
+    if workerRes.isOk:
+      let worker = workerRes.get()
+      let bridgeRes = newMqttAsyncBridge(worker, pollMs = 1)
+      check bridgeRes.isOk
+
+      if bridgeRes.isOk:
+        let bridge = bridgeRes.get()
+        check worker.requestStop(id = 311).isOk
+
+        var sawStopped = false
+        for _ in 0 ..< 100:
+          let drainRes = bridge.drainEvents()
+          check drainRes.isOk
+          if drainRes.isOk:
+            for event in drainRes.get():
+              if event.kind == mevStopped and event.commandId == 311:
+                sawStopped = true
+                break
+          if sawStopped:
+            break
+          sleep(10)
+
+        check sawStopped
+        bridge.close()
+
       check worker.joinMqttWorker().isOk
 
 when getEnv("MOSQUITTO_NIM_TEST_BROKER") == "1":
