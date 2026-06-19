@@ -57,6 +57,7 @@ type
     connected: bool
     state: MqttConnectionState
     stopped: bool
+    pending: MqttPendingOperations
     pendingCount: int
     subscriptions: seq[MqttSubscription]
     lastError: Option[MqttError]
@@ -112,6 +113,7 @@ proc ensureClient(ctx: MqttCtx) =
   ctx.running = false
   ctx.connected = false
   ctx.state = mcsDisconnected
+  ctx.pending = emptyPendingOperations()
   ctx.stopped = false
 
 proc handleCompatEvent(ctx: MqttCtx; event: MqttEvent): Future[void] {.async.} =
@@ -119,17 +121,21 @@ proc handleCompatEvent(ctx: MqttCtx; event: MqttEvent): Future[void] {.async.} =
   of mevStateChanged:
     ctx.state = event.state
     ctx.connected = event.state.isConnected()
+  of mevPendingChanged:
+    ctx.pending = event.pending
   of mevConnected:
     ctx.state = mcsConnected
     ctx.connected = true
   of mevDisconnected:
     ctx.state = mcsDisconnected
     ctx.connected = false
+    ctx.pending = emptyPendingOperations()
   of mevPublishCompleted, mevSubscribed, mevUnsubscribed:
     if ctx.pendingCount > 0:
       dec ctx.pendingCount
   of mevStopped:
     ctx.state = mcsStopped
+    ctx.pending = emptyPendingOperations()
     ctx.running = false
     ctx.stopped = true
   of mevError:
@@ -188,6 +194,7 @@ proc newMqttCtx*(clientId: string): MqttCtx =
   result.sslOn = false
   result.connectTimeoutMs = 5000
   result.pumpSleepMs = 1
+  result.pending = emptyPendingOperations()
   result.pendingCount = 0
   result.subscriptions = @[]
   result.lastError = none(MqttError)
@@ -335,6 +342,8 @@ proc disconnect*(ctx: MqttCtx) {.async.} =
 
   ctx.connected = false
   ctx.started = false
+  ctx.pending = emptyPendingOperations()
+  ctx.pendingCount = 0
   ctx.client = nil
   ctx.subscriptions.setLen(0)
 
@@ -426,7 +435,13 @@ proc currentState*(ctx: MqttCtx): MqttConnectionState =
 proc isConnected*(ctx: MqttCtx): bool =
   result = not ctx.isNil and ctx.state.isConnected()
 
+proc pendingOperations*(ctx: MqttCtx): MqttPendingOperations =
+  ## Return the latest worker-reported pending operation snapshot.
+  if ctx.isNil:
+    return emptyPendingOperations()
+  result = ctx.pending
+
 proc msgQueue*(ctx: MqttCtx): int =
   if ctx.isNil:
     return 0
-  result = ctx.pendingCount
+  result = max(ctx.pendingCount, ctx.pending.total)

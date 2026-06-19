@@ -42,6 +42,7 @@ type
     dispatcher: MqttDispatcher
     nextCommandId: int
     state: MqttConnectionState
+    pending: MqttPendingOperations
     closed: bool
 
 # ------------------------------------------------------------------------------
@@ -66,12 +67,16 @@ proc updateStateFromEvent(client: MqttClient; event: MqttEvent) =
   case event.kind
   of mevStateChanged:
     client.state = event.state
+  of mevPendingChanged:
+    client.pending = event.pending
   of mevConnected:
     client.state = mcsConnected
   of mevDisconnected:
     client.state = mcsDisconnected
+    client.pending = emptyPendingOperations()
   of mevStopped:
     client.state = mcsStopped
+    client.pending = emptyPendingOperations()
   else:
     discard
 
@@ -138,6 +143,7 @@ proc startMqttClient*(clientId = ""; cleanSession = true;
   client.dispatcher = newMqttDispatcher()
   client.nextCommandId = 0
   client.state = mcsDisconnected
+  client.pending = emptyPendingOperations()
   client.closed = false
   result = ok(client)
 
@@ -155,6 +161,25 @@ proc currentState*(client: MqttClient): MqttConnectionState {.inline.} =
 
 proc isConnected*(client: MqttClient): bool {.inline.} =
   result = not client.isNil and client.state.isConnected()
+
+proc pendingOperations*(client: MqttClient): MqttPendingOperations {.inline.} =
+  ## Return the latest worker-reported in-flight operation snapshot.
+  ##
+  ## This reflects broker-level pending mids that the worker has already
+  ## submitted to libmosquitto. It does not include commands that are only queued
+  ## locally and not yet processed by the worker.
+  if client.isNil:
+    return emptyPendingOperations()
+  result = client.pending
+
+proc pendingTotal*(client: MqttClient): int {.inline.} =
+  if client.isNil:
+    return 0
+  result = client.pending.total
+
+proc msgQueue*(client: MqttClient): int {.inline.} =
+  ## Compatibility/debug helper returning the latest pending operation total.
+  result = client.pendingTotal()
 
 proc joinMqttClient*(client: MqttClient): MqttResult[MqttOk] =
   ## Join the worker thread after a Stop command has been processed.
@@ -174,6 +199,7 @@ proc joinMqttClient*(client: MqttClient): MqttResult[MqttOk] =
       return err(joinRes.error)
 
   client.closed = true
+  client.pending = emptyPendingOperations()
   if client.state != mcsError:
     client.state = mcsStopped
   result = ok(MqttOk())

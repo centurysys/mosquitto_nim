@@ -1449,3 +1449,148 @@ when getEnv("MOSQUITTO_NIM_TEST_BROKER") == "1":
         return connectedEvent.isSome and disconnectedEvent.isSome and stoppedEvent.isSome
 
       check waitFor scenario()
+
+suite "mosquitto_nim pending operation tracking":
+  test "pending operation snapshots summarize in-flight operations":
+    let pending = pendingOperations(publishes = 2, subscribes = 1, unsubscribes = 3)
+    check pending.publishes == 2
+    check pending.subscribes == 1
+    check pending.unsubscribes == 3
+    check pending.total == 6
+    check not pending.isEmpty()
+
+    let empty = emptyPendingOperations()
+    check empty.isEmpty()
+    check empty.total == 0
+
+    let ev = pendingChangedEvent(pending, commandId = 42)
+    check ev.kind == mevPendingChanged
+    check ev.commandId == 42
+    check ev.pending.total == 6
+    check ev.summary().contains("total=6")
+
+  test "highlevel client exposes an empty pending snapshot before broker operations":
+    let clientRes = startMqttClient("mosquitto_nim_step23_pending_empty", pollMs = 1)
+    check clientRes.isOk
+
+    if clientRes.isOk:
+      let client = clientRes.get()
+      check client.pendingOperations().isEmpty()
+      check client.pendingTotal() == 0
+      check client.msgQueue() == 0
+
+      let stopRes = client.requestStop()
+      check stopRes.isOk
+      if stopRes.isOk:
+        var sawStopped = false
+        for _ in 0 ..< 100:
+          let drainRes = client.drainEvents()
+          check drainRes.isOk
+          if drainRes.isOk:
+            for event in drainRes.get():
+              if event.kind == mevStopped and event.commandId == stopRes.get():
+                sawStopped = true
+                break
+          if sawStopped:
+            break
+          sleep(10)
+        check sawStopped
+
+      check client.joinMqttClient().isOk
+
+when getEnv("MOSQUITTO_NIM_TEST_BROKER") == "1":
+  suite "mosquitto_nim pending operation broker test":
+    test "highlevel client receives pending publish snapshots":
+      proc waitForEvent(client: MqttClient; maxRounds: int;
+                        wantedKind: MqttEventKind; commandId = -1): Future[Option[MqttEvent]] {.async.} =
+        for _ in 0 ..< maxRounds:
+          let drainRes = client.drainEvents()
+          check drainRes.isOk
+          if drainRes.isOk:
+            for event in drainRes.get():
+              if event.kind == wantedKind:
+                if commandId >= 0 and event.commandId != commandId:
+                  continue
+                return some(event)
+          await sleepAsync(10)
+
+        return none(MqttEvent)
+
+      proc scenario(): Future[bool] {.async.} =
+        let host = getEnv("MOSQUITTO_NIM_TEST_HOST", "127.0.0.1")
+        let port = parseInt(getEnv("MOSQUITTO_NIM_TEST_PORT", "1883"))
+        let topic = "mosquitto_nim/step23/pending/" & $getTime().toUnix() & "_" & $getCurrentProcessId()
+
+        let clientRes = startMqttClient("mosquitto_nim_step23_pending", loopTimeoutMs = 10, pollMs = 1)
+        check clientRes.isOk
+        if clientRes.isErr:
+          return false
+
+        let client = clientRes.get()
+        let connectIdRes = client.connect(host, port = port, keepalive = 30)
+        check connectIdRes.isOk
+        if connectIdRes.isErr:
+          discard client.requestStop()
+          discard client.joinMqttClient()
+          return false
+
+        let connectedEvent = await waitForEvent(client, 300, mevConnected, connectIdRes.get())
+        check connectedEvent.isSome
+        if connectedEvent.isNone:
+          discard client.requestStop()
+          discard client.joinMqttClient()
+          return false
+
+        let publishIdRes = client.publish(topic, "hello-pending", qos1, retain = false)
+        check publishIdRes.isOk
+        if publishIdRes.isErr:
+          discard client.requestStop()
+          discard client.joinMqttClient()
+          return false
+
+        var sawPendingNonZero = false
+        var sawPendingZero = false
+        var sawCompleted = false
+        for _ in 0 ..< 400:
+          let drainRes = client.drainEvents()
+          check drainRes.isOk
+          if drainRes.isOk:
+            for event in drainRes.get():
+              case event.kind
+              of mevPendingChanged:
+                if event.commandId == publishIdRes.get():
+                  if event.pending.publishes > 0:
+                    sawPendingNonZero = true
+                  if event.pending.total == 0:
+                    sawPendingZero = true
+              of mevPublishCompleted:
+                if event.commandId == publishIdRes.get():
+                  sawCompleted = true
+              of mevError:
+                checkpoint event.summary()
+              else:
+                discard
+
+          if sawPendingNonZero and sawPendingZero and sawCompleted:
+            break
+          await sleepAsync(10)
+
+        check sawPendingNonZero
+        check sawPendingZero
+        check sawCompleted
+        check client.pendingTotal() == 0
+
+        let disconnectIdRes = client.disconnect()
+        check disconnectIdRes.isOk
+        if disconnectIdRes.isOk:
+          discard await waitForEvent(client, 200, mevDisconnected, disconnectIdRes.get())
+
+        let stopIdRes = client.requestStop()
+        check stopIdRes.isOk
+        if stopIdRes.isOk:
+          discard await waitForEvent(client, 200, mevStopped, stopIdRes.get())
+
+        check client.joinMqttClient().isOk
+        return sawPendingNonZero and sawPendingZero and sawCompleted
+
+      check waitFor scenario()

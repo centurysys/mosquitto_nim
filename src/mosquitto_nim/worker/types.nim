@@ -32,6 +32,7 @@ type
 
   MqttEventKind* = enum
     mevStateChanged
+    mevPendingChanged
     mevConnected
     mevDisconnected
     mevPublishAccepted
@@ -64,6 +65,17 @@ type
     retain*: bool
     properties*: MqttProperties
 
+  MqttPendingOperations* = object
+    ## Snapshot of broker-acknowledged operations that are currently in flight.
+    ##
+    ## These counters are emitted by the worker when its pending mid tables
+    ## change.  They do not include commands that have merely been accepted into
+    ## the local command queue but have not been processed by the worker yet.
+    publishes*: int
+    subscribes*: int
+    unsubscribes*: int
+    total*: int
+
   MqttEvent* = object
     ## Event emitted by the MQTT worker.
     ##
@@ -79,6 +91,7 @@ type
     reasonCode*: int
     flags*: int
     grantedQos*: seq[int]
+    pending*: MqttPendingOperations
 
 
 # ------------------------------------------------------------------------------
@@ -89,6 +102,23 @@ proc isConnected*(state: MqttConnectionState): bool {.inline.} =
 
 proc isTerminal*(state: MqttConnectionState): bool {.inline.} =
   result = state in {mcsStopped, mcsError}
+
+# ------------------------------------------------------------------------------
+# Pending operation helpers
+# ------------------------------------------------------------------------------
+proc pendingOperations*(publishes = 0; subscribes = 0; unsubscribes = 0): MqttPendingOperations =
+  result = MqttPendingOperations(
+    publishes: publishes,
+    subscribes: subscribes,
+    unsubscribes: unsubscribes,
+    total: publishes + subscribes + unsubscribes
+  )
+
+proc emptyPendingOperations*(): MqttPendingOperations {.inline.} =
+  result = pendingOperations()
+
+proc isEmpty*(pending: MqttPendingOperations): bool {.inline.} =
+  result = pending.total == 0
 
 # ------------------------------------------------------------------------------
 # Payload helpers
@@ -192,6 +222,13 @@ proc stateChangedEvent*(state: MqttConnectionState; commandId = 0; detail = ""):
     detail: detail
   )
 
+proc pendingChangedEvent*(pending: MqttPendingOperations; commandId = 0): MqttEvent =
+  result = MqttEvent(
+    commandId: commandId,
+    kind: mevPendingChanged,
+    pending: pending
+  )
+
 proc connectedEvent*(commandId = 0; reasonCode = 0; flags = 0): MqttEvent =
   result = MqttEvent(
     commandId: commandId,
@@ -272,6 +309,8 @@ proc summary*(event: MqttEvent): string =
   case event.kind
   of mevStateChanged:
     result = &"{event.kind}(commandId={event.commandId}, state={event.state}, detail={event.detail})"
+  of mevPendingChanged:
+    result = &"{event.kind}(commandId={event.commandId}, publishes={event.pending.publishes}, subscribes={event.pending.subscribes}, unsubscribes={event.pending.unsubscribes}, total={event.pending.total})"
   of mevMessageReceived:
     result = &"{event.kind}(commandId={event.commandId}, topic={event.message.topic}, payloadLen={event.message.payload.len})"
   of mevError:

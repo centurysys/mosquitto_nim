@@ -74,6 +74,35 @@ proc sendWorkerState(eventQueue: ThreadQueue[MqttEvent]; state: MqttConnectionSt
                      commandId = 0; detail = "") {.raises: [].} =
   sendWorkerEvent(eventQueue, stateChangedEvent(state, commandId = commandId, detail = detail))
 
+proc currentPendingOperations(pendingPublishes: Table[int, int];
+                              pendingSubscribes: Table[int, int];
+                              pendingUnsubscribes: Table[int, int]): MqttPendingOperations =
+  result = pendingOperations(
+    publishes = pendingPublishes.len,
+    subscribes = pendingSubscribes.len,
+    unsubscribes = pendingUnsubscribes.len
+  )
+
+proc sendWorkerPending(eventQueue: ThreadQueue[MqttEvent];
+                       pendingPublishes: Table[int, int];
+                       pendingSubscribes: Table[int, int];
+                       pendingUnsubscribes: Table[int, int];
+                       commandId = 0) {.raises: [].} =
+  sendWorkerEvent(
+    eventQueue,
+    pendingChangedEvent(
+      currentPendingOperations(pendingPublishes, pendingSubscribes, pendingUnsubscribes),
+      commandId = commandId
+    )
+  )
+
+proc clearPendingOperations(pendingPublishes: var Table[int, int];
+                            pendingSubscribes: var Table[int, int];
+                            pendingUnsubscribes: var Table[int, int]) =
+  pendingPublishes.clear()
+  pendingSubscribes.clear()
+  pendingUnsubscribes.clear()
+
 proc flushLoop(client: LowLevelClient; eventQueue: ThreadQueue[MqttEvent];
                loopActive: var bool; loopTimeoutMs: int; rounds: int) {.raises: [].} =
   ## Run a few manual-loop iterations and report failures as worker errors.
@@ -109,6 +138,8 @@ proc handleCommand(command: sink MqttCommand; running: var bool;
       discard disconnectLowLevelClient(client)
       flushLoop(client, eventQueue, loopActive, loopTimeoutMs, rounds = 2)
       loopActive = false
+    clearPendingOperations(pendingPublishes, pendingSubscribes, pendingUnsubscribes)
+    sendWorkerPending(eventQueue, pendingPublishes, pendingSubscribes, pendingUnsubscribes, commandId = cmd.id)
     running = false
     sendWorkerState(eventQueue, mcsStopped, commandId = cmd.id, detail = "worker stopped")
     sendWorkerEvent(eventQueue, stoppedEvent(commandId = cmd.id))
@@ -200,6 +231,7 @@ proc handleCommand(command: sink MqttCommand; running: var bool;
     let mid = publishRes.get()
     if mid != 0:
       pendingPublishes[mid] = cmd.id
+      sendWorkerPending(eventQueue, pendingPublishes, pendingSubscribes, pendingUnsubscribes, commandId = cmd.id)
     sendWorkerEvent(eventQueue, publishAcceptedEvent(mid, commandId = cmd.id))
 
   of mckSubscribe:
@@ -215,6 +247,7 @@ proc handleCommand(command: sink MqttCommand; running: var bool;
     let mid = subscribeRes.get()
     if mid != 0:
       pendingSubscribes[mid] = cmd.id
+      sendWorkerPending(eventQueue, pendingPublishes, pendingSubscribes, pendingUnsubscribes, commandId = cmd.id)
 
   of mckUnsubscribe:
     if not loopActive:
@@ -229,6 +262,7 @@ proc handleCommand(command: sink MqttCommand; running: var bool;
     let mid = unsubscribeRes.get()
     if mid != 0:
       pendingUnsubscribes[mid] = cmd.id
+      sendWorkerPending(eventQueue, pendingPublishes, pendingSubscribes, pendingUnsubscribes, commandId = cmd.id)
 
 proc workerMain(args: MqttWorkerArgs) {.thread.} =
   var stopCommandId = 0
@@ -284,6 +318,8 @@ proc workerMain(args: MqttWorkerArgs) {.thread.} =
       let commandId = pendingDisconnectId
       pendingDisconnectId = 0
       loopActive = false
+      clearPendingOperations(pendingPublishes, pendingSubscribes, pendingUnsubscribes)
+      sendWorkerPending(args.eventQueue, pendingPublishes, pendingSubscribes, pendingUnsubscribes, commandId = commandId)
       sendWorkerState(args.eventQueue, mcsDisconnected, commandId = commandId, detail = "disconnect callback")
       sendWorkerEvent(
         args.eventQueue,
@@ -294,6 +330,7 @@ proc workerMain(args: MqttWorkerArgs) {.thread.} =
       let commandId = pendingPublishes.getOrDefault(event.mid, 0)
       if event.mid in pendingPublishes:
         pendingPublishes.del(event.mid)
+        sendWorkerPending(args.eventQueue, pendingPublishes, pendingSubscribes, pendingUnsubscribes, commandId = commandId)
       sendWorkerEvent(
         args.eventQueue,
         publishCompletedEvent(event.mid, commandId = commandId, reasonCode = event.reasonCode)
@@ -303,6 +340,7 @@ proc workerMain(args: MqttWorkerArgs) {.thread.} =
       let commandId = pendingSubscribes.getOrDefault(event.mid, 0)
       if event.mid in pendingSubscribes:
         pendingSubscribes.del(event.mid)
+        sendWorkerPending(args.eventQueue, pendingPublishes, pendingSubscribes, pendingUnsubscribes, commandId = commandId)
       sendWorkerEvent(
         args.eventQueue,
         subscribedEvent(event.mid, commandId = commandId, grantedQos = event.grantedQos)
@@ -312,6 +350,7 @@ proc workerMain(args: MqttWorkerArgs) {.thread.} =
       let commandId = pendingUnsubscribes.getOrDefault(event.mid, 0)
       if event.mid in pendingUnsubscribes:
         pendingUnsubscribes.del(event.mid)
+        sendWorkerPending(args.eventQueue, pendingPublishes, pendingSubscribes, pendingUnsubscribes, commandId = commandId)
       sendWorkerEvent(args.eventQueue, unsubscribedEvent(event.mid, commandId = commandId))
 
   let sinkRes = setMessageSink(client, messageSink)
@@ -351,6 +390,8 @@ proc workerMain(args: MqttWorkerArgs) {.thread.} =
         let loopRes = loopLowLevelClient(client, timeoutMs = args.loopTimeoutMs)
         if loopRes.isErr:
           loopActive = false
+          clearPendingOperations(pendingPublishes, pendingSubscribes, pendingUnsubscribes)
+          sendWorkerPending(args.eventQueue, pendingPublishes, pendingSubscribes, pendingUnsubscribes)
           sendWorkerState(args.eventQueue, mcsError, detail = "mosquitto loop error")
           sendWorkerError(args.eventQueue, loopRes.error)
       else:
@@ -364,6 +405,8 @@ proc workerMain(args: MqttWorkerArgs) {.thread.} =
   if loopActive:
     discard disconnectLowLevelClient(client)
     loopActive = false
+
+  clearPendingOperations(pendingPublishes, pendingSubscribes, pendingUnsubscribes)
 
   if running:
     sendWorkerState(args.eventQueue, mcsStopped, commandId = stopCommandId, detail = "worker stopped after loop exit")
