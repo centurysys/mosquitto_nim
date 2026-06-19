@@ -43,6 +43,12 @@ proc `$`*(error: MqttError): string =
   else:
     result = &"{error.context}: {error.message} (kind={error.kind})"
 
+proc invalidArgument*(context, message: string): MqttError =
+  result = makeError(meInvalidArgument, context, message)
+
+proc invalidState*(context, message: string): MqttError =
+  result = makeError(meInvalidState, context, message)
+
 # ------------------------------------------------------------------------------
 # libmosquitto error helpers
 # ------------------------------------------------------------------------------
