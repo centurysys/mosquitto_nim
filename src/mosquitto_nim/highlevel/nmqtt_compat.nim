@@ -62,6 +62,8 @@ type
     stopped: bool
     pending: MqttPendingOperations
     queue: MqttQueueSnapshot
+    lastConnectReasonCode: int
+    lastConnectProperties: MqttProperties
     pendingCount: int
     subscriptions: seq[MqttSubscription]
     lastError: Option[MqttError]
@@ -149,6 +151,8 @@ proc handleCompatEvent(ctx: MqttCtx; event: MqttEvent): Future[void] {.async.} =
   of mevConnected:
     ctx.state = mcsConnected
     ctx.connected = true
+    ctx.lastConnectReasonCode = event.reasonCode
+    ctx.lastConnectProperties = event.properties
   of mevDisconnected:
     ctx.state = mcsDisconnected
     ctx.connected = false
@@ -169,6 +173,9 @@ proc handleCompatEvent(ctx: MqttCtx; event: MqttEvent): Future[void] {.async.} =
     ctx.stopped = true
   of mevError:
     ctx.setLastError(event.error)
+    if event.properties.len > 0 or event.reasonCode != 0:
+      ctx.lastConnectReasonCode = event.reasonCode
+      ctx.lastConnectProperties = event.properties
   else:
     discard
 
@@ -228,6 +235,8 @@ proc newMqttCtx*(clientId: string): MqttCtx =
   result.pumpSleepMs = 1
   result.pending = emptyPendingOperations()
   result.queue = emptyQueueSnapshot()
+  result.lastConnectReasonCode = 0
+  result.lastConnectProperties = @[]
   result.pendingCount = 0
   result.subscriptions = @[]
   result.lastError = none(MqttError)
@@ -389,6 +398,18 @@ proc lastError*(ctx: MqttCtx): Option[MqttError] =
   if ctx.isNil:
     return none(MqttError)
   result = ctx.lastError
+
+proc lastConnectReasonCode*(ctx: MqttCtx): int =
+  ## Return the last MQTT CONNACK reason code observed by the compatibility ctx.
+  if ctx.isNil:
+    return 0
+  result = ctx.lastConnectReasonCode
+
+proc lastConnectProperties*(ctx: MqttCtx): MqttProperties =
+  ## Return the last MQTT v5 CONNACK properties observed by the compatibility ctx.
+  if ctx.isNil:
+    return @[]
+  result = ctx.lastConnectProperties
 
 # ------------------------------------------------------------------------------
 # nmqtt-compatible lifecycle API

@@ -81,8 +81,9 @@ proc sendWorkerEvent(eventQueue: ThreadQueue[MqttEvent]; event: sink MqttEvent) 
   discard eventQueue.sendMove(ev)
 
 proc sendWorkerError(eventQueue: ThreadQueue[MqttEvent]; error: MqttError;
-                     commandId = 0) {.raises: [].} =
-  sendWorkerEvent(eventQueue, errorEvent(error, commandId))
+                     commandId = 0; reasonCode = 0;
+                     properties: MqttProperties = @[]) {.raises: [].} =
+  sendWorkerEvent(eventQueue, errorEvent(error, commandId, reasonCode = reasonCode, properties = properties))
 
 proc sendWorkerState(eventQueue: ThreadQueue[MqttEvent]; state: MqttConnectionState;
                      commandId = 0; detail = "") {.raises: [].} =
@@ -661,7 +662,7 @@ proc workerMain(args: MqttWorkerArgs) {.thread.} =
         sendWorkerState(args.eventQueue, mcsConnected, commandId = commandId, detail = "connect callback")
         sendWorkerEvent(
           args.eventQueue,
-          connectedEvent(commandId = commandId, reasonCode = event.reasonCode, flags = event.flags)
+          connectedEvent(commandId = commandId, reasonCode = event.reasonCode, flags = event.flags, properties = event.properties)
         )
         flushOfflinePublishes(
           offlineQueue,
@@ -675,7 +676,13 @@ proc workerMain(args: MqttWorkerArgs) {.thread.} =
       else:
         loopActive = false
         sendWorkerState(args.eventQueue, mcsError, commandId = commandId, detail = "connect rejected")
-        sendWorkerError(args.eventQueue, protocolReason("MQTT connect callback", event.reasonCode), commandId)
+        sendWorkerError(
+          args.eventQueue,
+          protocolReason("MQTT connect callback", event.reasonCode),
+          commandId,
+          reasonCode = event.reasonCode,
+          properties = event.properties
+        )
 
     of lleDisconnected:
       let explicit = reconnect.explicitDisconnectRequested or pendingDisconnectId != 0
@@ -689,7 +696,7 @@ proc workerMain(args: MqttWorkerArgs) {.thread.} =
       sendWorkerState(args.eventQueue, mcsDisconnected, commandId = commandId, detail = "disconnect callback")
       sendWorkerEvent(
         args.eventQueue,
-        disconnectedEvent(commandId = commandId, reasonCode = event.reasonCode)
+        disconnectedEvent(commandId = commandId, reasonCode = event.reasonCode, properties = event.properties)
       )
       if not explicit:
         discard scheduleReconnect(reconnect, args.eventQueue, detail = "unexpected disconnect")
@@ -701,7 +708,7 @@ proc workerMain(args: MqttWorkerArgs) {.thread.} =
         sendWorkerPending(args.eventQueue, pendingPublishes, pendingSubscribes, pendingUnsubscribes, commandId = commandId)
       sendWorkerEvent(
         args.eventQueue,
-        publishCompletedEvent(event.mid, commandId = commandId, reasonCode = event.reasonCode)
+        publishCompletedEvent(event.mid, commandId = commandId, reasonCode = event.reasonCode, properties = event.properties)
       )
 
     of lleSubscribed:
@@ -711,7 +718,7 @@ proc workerMain(args: MqttWorkerArgs) {.thread.} =
         sendWorkerPending(args.eventQueue, pendingPublishes, pendingSubscribes, pendingUnsubscribes, commandId = commandId)
       sendWorkerEvent(
         args.eventQueue,
-        subscribedEvent(event.mid, commandId = commandId, grantedQos = event.grantedQos)
+        subscribedEvent(event.mid, commandId = commandId, grantedQos = event.grantedQos, properties = event.properties)
       )
 
     of lleUnsubscribed:
@@ -719,7 +726,7 @@ proc workerMain(args: MqttWorkerArgs) {.thread.} =
       if event.mid in pendingUnsubscribes:
         pendingUnsubscribes.del(event.mid)
         sendWorkerPending(args.eventQueue, pendingPublishes, pendingSubscribes, pendingUnsubscribes, commandId = commandId)
-      sendWorkerEvent(args.eventQueue, unsubscribedEvent(event.mid, commandId = commandId))
+      sendWorkerEvent(args.eventQueue, unsubscribedEvent(event.mid, commandId = commandId, properties = event.properties))
 
   let sinkRes = setMessageSink(client, messageSink)
   if sinkRes.isErr:

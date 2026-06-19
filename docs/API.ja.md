@@ -84,6 +84,19 @@ PUBLISH で対応しているもの:
 - `payloadFormatIndicatorUtf8()`
 - `payloadFormatIndicatorUnspecified()`
 
+MQTT v5 CONNACK/control callback からは、libmosquitto が渡した場合に次の properties を Nim-owned value としてコピーします。
+
+- `assignedClientIdentifier(clientId)`
+- `serverKeepAlive(seconds)`
+- `receiveMaximum(maximum)`
+- `maximumPacketSize(bytes)`
+- `reasonString(value)`
+- `responseInformation(value)`
+- `serverReference(value)`
+- `userProperty(name, value)`
+
+これらは `mevConnected`, `mevDisconnected`, `mevPublishCompleted`, `mevSubscribed`, `mevUnsubscribed`, 接続拒否時の `mevError` の `MqttEvent.properties` で参照できます。highlevel / nmqtt 互換 client には直近の CONNACK 系情報を見る `lastConnectReasonCode()` と `lastConnectProperties()` もあります。
+
 新規の PUBLISH コードでは、これらの helper を `mqttPublishProperties(...)` で `MqttPublishProperties` に変換してから `publishV5()` に渡します。互換性のため従来の `MqttProperties` overload も残しています。
 
 API分離用に追加した型付きコンテナ:

@@ -142,6 +142,7 @@ type
     reasonCode*: int
     flags*: int
     grantedQos*: seq[int]
+    properties*: MqttProperties
     pending*: MqttPendingOperations
     queue*: MqttQueueSnapshot
     reconnectDelayMs*: int
@@ -454,22 +455,26 @@ proc queueChangedEvent*(queue: MqttQueueSnapshot; commandId = 0): MqttEvent =
     queue: queue
   )
 
-proc connectedEvent*(commandId = 0; reasonCode = 0; flags = 0): MqttEvent =
+proc connectedEvent*(commandId = 0; reasonCode = 0; flags = 0;
+                     properties: MqttProperties = @[]): MqttEvent =
   result = MqttEvent(
     commandId: commandId,
     kind: mevConnected,
     state: mcsConnected,
     reasonCode: reasonCode,
-    flags: flags
+    flags: flags,
+    properties: properties
   )
 
-proc disconnectedEvent*(commandId = 0; detail = ""; reasonCode = 0): MqttEvent =
+proc disconnectedEvent*(commandId = 0; detail = ""; reasonCode = 0;
+                        properties: MqttProperties = @[]): MqttEvent =
   result = MqttEvent(
     commandId: commandId,
     kind: mevDisconnected,
     state: mcsDisconnected,
     detail: detail,
-    reasonCode: reasonCode
+    reasonCode: reasonCode,
+    properties: properties
   )
 
 proc publishAcceptedEvent*(mid: int; commandId = 0): MqttEvent =
@@ -479,25 +484,30 @@ proc publishAcceptedEvent*(mid: int; commandId = 0): MqttEvent =
   ## libmosquitto's on_publish callback after QoS1/2 completion.
   result = MqttEvent(commandId: commandId, kind: mevPublishAccepted, mid: mid)
 
-proc publishCompletedEvent*(mid: int; commandId = 0; reasonCode = 0): MqttEvent =
+proc publishCompletedEvent*(mid: int; commandId = 0; reasonCode = 0;
+                            properties: MqttProperties = @[]): MqttEvent =
   ## PUBLISH completion callback was received from libmosquitto.
   result = MqttEvent(
     commandId: commandId,
     kind: mevPublishCompleted,
     mid: mid,
-    reasonCode: reasonCode
+    reasonCode: reasonCode,
+    properties: properties
   )
 
-proc subscribedEvent*(mid: int; commandId = 0; grantedQos: openArray[int] = []): MqttEvent =
+proc subscribedEvent*(mid: int; commandId = 0; grantedQos: openArray[int] = [];
+                      properties: MqttProperties = @[]): MqttEvent =
   result = MqttEvent(
     commandId: commandId,
     kind: mevSubscribed,
     mid: mid,
-    grantedQos: @grantedQos
+    grantedQos: @grantedQos,
+    properties: properties
   )
 
-proc unsubscribedEvent*(mid: int; commandId = 0): MqttEvent =
-  result = MqttEvent(commandId: commandId, kind: mevUnsubscribed, mid: mid)
+proc unsubscribedEvent*(mid: int; commandId = 0;
+                        properties: MqttProperties = @[]): MqttEvent =
+  result = MqttEvent(commandId: commandId, kind: mevUnsubscribed, mid: mid, properties: properties)
 
 proc reconnectScheduledEvent*(delayMs: int; attempt: int; commandId = 0;
                               detail = ""): MqttEvent =
@@ -526,8 +536,15 @@ proc messageReceivedEvent*(message: sink MqttMessage; commandId = 0): MqttEvent 
     message: move message
   )
 
-proc errorEvent*(error: MqttError; commandId = 0): MqttEvent =
-  result = MqttEvent(commandId: commandId, kind: mevError, error: error)
+proc errorEvent*(error: MqttError; commandId = 0; reasonCode = 0;
+                 properties: MqttProperties = @[]): MqttEvent =
+  result = MqttEvent(
+    commandId: commandId,
+    kind: mevError,
+    error: error,
+    reasonCode: reasonCode,
+    properties: properties
+  )
 
 proc stoppedEvent*(commandId = 0): MqttEvent =
   result = MqttEvent(commandId: commandId, kind: mevStopped, state: mcsStopped)
@@ -568,14 +585,21 @@ proc summary*(event: MqttEvent): string =
   of mevMessageReceived:
     result = &"{event.kind}(commandId={event.commandId}, topic={event.message.topic}, payloadLen={event.message.payload.len})"
   of mevError:
-    result = &"{event.kind}(commandId={event.commandId}, error={event.error})"
-  of mevPublishAccepted, mevPublishCompleted, mevUnsubscribed:
+    let props = if event.properties.len > 0: &", reasonCode={event.reasonCode}, properties={event.properties.len}" else: ""
+    result = &"{event.kind}(commandId={event.commandId}, error={event.error}{props})"
+  of mevPublishAccepted:
     result = &"{event.kind}(commandId={event.commandId}, mid={event.mid}, reasonCode={event.reasonCode})"
+  of mevPublishCompleted, mevUnsubscribed:
+    let props = if event.properties.len > 0: &", properties={event.properties.len}" else: ""
+    result = &"{event.kind}(commandId={event.commandId}, mid={event.mid}, reasonCode={event.reasonCode}{props})"
   of mevSubscribed:
-    result = &"{event.kind}(commandId={event.commandId}, mid={event.mid}, grantedQos={event.grantedQos})"
+    let props = if event.properties.len > 0: &", properties={event.properties.len}" else: ""
+    result = &"{event.kind}(commandId={event.commandId}, mid={event.mid}, grantedQos={event.grantedQos}{props})"
   of mevDisconnected:
-    result = &"{event.kind}(commandId={event.commandId}, state={event.state}, detail={event.detail}, reasonCode={event.reasonCode})"
+    let props = if event.properties.len > 0: &", properties={event.properties.len}" else: ""
+    result = &"{event.kind}(commandId={event.commandId}, state={event.state}, detail={event.detail}, reasonCode={event.reasonCode}{props})"
   of mevConnected:
-    result = &"{event.kind}(commandId={event.commandId}, state={event.state}, reasonCode={event.reasonCode}, flags={event.flags})"
+    let props = if event.properties.len > 0: &", properties={event.properties.len}" else: ""
+    result = &"{event.kind}(commandId={event.commandId}, state={event.state}, reasonCode={event.reasonCode}, flags={event.flags}{props})"
   of mevStopped:
     result = &"{event.kind}(commandId={event.commandId})"

@@ -47,6 +47,15 @@ Currently implemented:
   - Message Expiry Interval
   - Content Type
   - Payload Format Indicator
+- MQTT v5 CONNACK/control property copy:
+  - Assigned Client Identifier
+  - Server Keep Alive
+  - Receive Maximum
+  - Maximum Packet Size
+  - Reason String
+  - Response Information
+  - Server Reference
+  - User Property
 
 ## Requirements
 
@@ -77,6 +86,11 @@ If the application separately uses Nim's `std/httpclient`, `std/net`, or
 
 With the current dynlib approach, `libssl` / `libcrypto` are resolved through
 `libmosquitto.so.1` and its dynamic dependencies.
+
+For public cloud brokers, the server certificate is normally signed by a public
+CA. Self-signed certificates are mainly needed for local/private broker tests.
+Some cloud brokers require client certificate authentication; use `mqttTls()` or
+the nmqtt-compatible `set_ssl_certificates()` path for client cert/key plumbing.
 
 ## Quick example: nmqtt-compatible facade
 

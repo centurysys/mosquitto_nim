@@ -247,6 +247,38 @@ suite "mosquitto_nim worker value types":
     check completed.kind == mevPublishCompleted
     check completed.mid == 12
 
+  test "control events can carry MQTT v5 properties":
+    let ev = connectedEvent(
+      commandId = 31,
+      reasonCode = 0,
+      flags = 1,
+      properties = @[
+        assignedClientIdentifier("assigned-client-31"),
+        receiveMaximum(8'u16),
+        maximumPacketSize(65536'u32),
+        reasonString("connection accepted")
+      ]
+    )
+
+    check ev.kind == mevConnected
+    check ev.properties.len == 4
+    check ev.properties[0].kind == mpAssignedClientIdentifier
+    check ev.properties[0].value == "assigned-client-31"
+    check ev.properties[1].kind == mpReceiveMaximum
+    check ev.properties[1].intValue == 8'u32
+    check ev.summary().contains("properties=4")
+
+    let errEv = errorEvent(
+      invalidState("MQTT connect callback", "rejected"),
+      commandId = 32,
+      reasonCode = 128,
+      properties = @[reasonString("bad username or password")]
+    )
+    check errEv.kind == mevError
+    check errEv.reasonCode == 128
+    check errEv.properties.len == 1
+    check errEv.properties[0].kind == mpReasonString
+
 
 suite "mosquitto_nim worker lifecycle":
   test "worker can start, receive stop command, and emit stopped event":
@@ -1531,11 +1563,105 @@ suite "mosquitto_nim MQTT v5 property helpers":
         check copied[5].propertyDataString() == "correlation-step28"
       freeMosquittoProperties(raw)
 
+  test "MQTT v5 control properties are copied into Nim-owned values":
+    var raw: ptr mosquitto_property = nil
+
+    check mosquitto_property_add_string(
+      addr raw,
+      MqttPropAssignedClientIdentifierId.cint,
+      "assigned-client".cstring
+    ) == 0
+    check mosquitto_property_add_int16(
+      addr raw,
+      MqttPropServerKeepAliveId.cint,
+      45'u16
+    ) == 0
+    check mosquitto_property_add_int16(
+      addr raw,
+      MqttPropReceiveMaximumId.cint,
+      12'u16
+    ) == 0
+    check mosquitto_property_add_int32(
+      addr raw,
+      MqttPropMaximumPacketSizeId.cint,
+      65536'u32
+    ) == 0
+    check mosquitto_property_add_string(
+      addr raw,
+      MqttPropReasonStringId.cint,
+      "accepted".cstring
+    ) == 0
+    check mosquitto_property_add_string(
+      addr raw,
+      MqttPropResponseInformationId.cint,
+      "response-info".cstring
+    ) == 0
+    check mosquitto_property_add_string(
+      addr raw,
+      MqttPropServerReferenceId.cint,
+      "mqtt.example.com".cstring
+    ) == 0
+    check mosquitto_property_add_string_pair(
+      addr raw,
+      MqttPropUserPropertyId.cint,
+      "broker".cstring,
+      "unit-test".cstring
+    ) == 0
+
+    let copiedRes = copyProperties(raw)
+    check copiedRes.isOk
+    if copiedRes.isOk:
+      let copied = copiedRes.get()
+      check copied.len == 8
+
+      var sawAssigned = false
+      var sawKeepalive = false
+      var sawReceiveMaximum = false
+      var sawMaximumPacket = false
+      var sawReason = false
+      var sawResponseInfo = false
+      var sawServerReference = false
+      var sawUser = false
+
+      for property in copied:
+        case property.kind
+        of mpAssignedClientIdentifier:
+          sawAssigned = property.value == "assigned-client"
+        of mpServerKeepAlive:
+          sawKeepalive = property.intValue == 45'u32
+        of mpReceiveMaximum:
+          sawReceiveMaximum = property.intValue == 12'u32
+        of mpMaximumPacketSize:
+          sawMaximumPacket = property.intValue == 65536'u32
+        of mpReasonString:
+          sawReason = property.value == "accepted"
+        of mpResponseInformation:
+          sawResponseInfo = property.value == "response-info"
+        of mpServerReference:
+          sawServerReference = property.value == "mqtt.example.com"
+        of mpUserProperty:
+          sawUser = property.name == "broker" and property.value == "unit-test"
+        else:
+          discard
+
+      check sawAssigned
+      check sawKeepalive
+      check sawReceiveMaximum
+      check sawMaximumPacket
+      check sawReason
+      check sawResponseInfo
+      check sawServerReference
+      check sawUser
+
+    freeMosquittoProperties(raw)
+
   test "invalid MQTT v5 properties are rejected by lowlevel property builder":
     check buildMosquittoProperties(@[userProperty("", "bad")]).isErr
     check buildMosquittoProperties(@[responseTopic("")]).isErr
     check buildMosquittoProperties(@[responseTopic("mosquitto_nim/+")]).isErr
     check buildMosquittoProperties(@[payloadFormatIndicator(2'u8)]).isErr
+    check buildMosquittoProperties(@[assignedClientIdentifier("assigned")]).isErr
+    check buildMosquittoProperties(@[reasonString("debug")]).isErr
 
 
 when getEnv("MOSQUITTO_NIM_TEST_BROKER") == "1":

@@ -44,6 +44,8 @@ type
     state: MqttConnectionState
     pending: MqttPendingOperations
     queue: MqttQueueSnapshot
+    lastConnectReasonCode: int
+    lastConnectProperties: MqttProperties
     connectProperties: MqttConnectProperties
     reconnectPolicy: MqttReconnectPolicy
     offlineQueuePolicy: MqttOfflineQueuePolicy
@@ -91,11 +93,17 @@ proc updateStateFromEvent(client: MqttClient; event: MqttEvent) =
     client.queue = event.queue
   of mevConnected:
     client.state = mcsConnected
+    client.lastConnectReasonCode = event.reasonCode
+    client.lastConnectProperties = event.properties
   of mevDisconnected:
     client.state = mcsDisconnected
     client.updatePendingSnapshot(emptyPendingOperations())
   of mevReconnectScheduled, mevReconnectAttempt:
     client.state = mcsReconnecting
+  of mevError:
+    if event.properties.len > 0 or event.reasonCode != 0:
+      client.lastConnectReasonCode = event.reasonCode
+      client.lastConnectProperties = event.properties
   of mevStopped:
     client.state = mcsStopped
     client.clearQueueSnapshots()
@@ -167,6 +175,8 @@ proc startMqttClient*(clientId = ""; cleanSession = true;
   client.state = mcsDisconnected
   client.pending = emptyPendingOperations()
   client.queue = emptyQueueSnapshot()
+  client.lastConnectReasonCode = 0
+  client.lastConnectProperties = @[]
   client.connectProperties = noConnectProperties()
   client.reconnectPolicy = noReconnect()
   client.offlineQueuePolicy = noOfflineQueue()
@@ -217,6 +227,21 @@ proc msgQueue*(client: MqttClient): int {.inline.} =
   if client.isNil:
     return 0
   result = client.queue.total
+
+proc lastConnectReasonCode*(client: MqttClient): int {.inline.} =
+  ## Return the last MQTT CONNACK reason code observed by the highlevel client.
+  ##
+  ## A value of 0 means success if a mevConnected event was seen. Non-zero values
+  ## may be set by a rejected MQTT v5 CONNACK error event.
+  if client.isNil:
+    return 0
+  result = client.lastConnectReasonCode
+
+proc lastConnectProperties*(client: MqttClient): MqttProperties {.inline.} =
+  ## Return the last MQTT v5 CONNACK properties observed by the highlevel client.
+  if client.isNil:
+    return @[]
+  result = client.lastConnectProperties
 
 proc connectProperties*(client: MqttClient): MqttConnectProperties {.inline.} =
   ## Return the MQTT v5 CONNECT properties attached to future connect commands.

@@ -57,57 +57,76 @@ proc onLowLevelConnect(mosq: ptr struct_mosquitto; userdata: pointer;
                        reasonCode: cint; flags: cint;
                        properties: ptr mosquitto_property) {.cdecl.} =
   discard mosq
-  discard properties
 
   let client = clientFromUserdata(userdata)
   if client.isNil:
     return
 
+  let propertiesRes = copyProperties(properties)
+  if propertiesRes.isErr:
+    client.rememberCallbackError(propertiesRes.error)
+    return
+
   client.emitControlEvent(LowLevelControlEvent(
     kind: lleConnected,
     reasonCode: reasonCode.int,
-    flags: flags.int
+    flags: flags.int,
+    properties: propertiesRes.get()
   ))
 
 proc onLowLevelDisconnect(mosq: ptr struct_mosquitto; userdata: pointer;
                           reasonCode: cint;
                           properties: ptr mosquitto_property) {.cdecl.} =
   discard mosq
-  discard properties
 
   let client = clientFromUserdata(userdata)
   if client.isNil:
     return
 
+  let propertiesRes = copyProperties(properties)
+  if propertiesRes.isErr:
+    client.rememberCallbackError(propertiesRes.error)
+    return
+
   client.emitControlEvent(LowLevelControlEvent(
     kind: lleDisconnected,
-    reasonCode: reasonCode.int
+    reasonCode: reasonCode.int,
+    properties: propertiesRes.get()
   ))
 
 proc onLowLevelPublish(mosq: ptr struct_mosquitto; userdata: pointer;
                        mid: cint; reasonCode: cint;
                        properties: ptr mosquitto_property) {.cdecl.} =
   discard mosq
-  discard properties
 
   let client = clientFromUserdata(userdata)
   if client.isNil:
     return
 
+  let propertiesRes = copyProperties(properties)
+  if propertiesRes.isErr:
+    client.rememberCallbackError(propertiesRes.error)
+    return
+
   client.emitControlEvent(LowLevelControlEvent(
     kind: llePublishCompleted,
     mid: mid.int,
-    reasonCode: reasonCode.int
+    reasonCode: reasonCode.int,
+    properties: propertiesRes.get()
   ))
 
 proc onLowLevelSubscribe(mosq: ptr struct_mosquitto; userdata: pointer;
                          mid: cint; qosCount: cint; grantedQos: ptr cint;
                          properties: ptr mosquitto_property) {.cdecl.} =
   discard mosq
-  discard properties
 
   let client = clientFromUserdata(userdata)
   if client.isNil:
+    return
+
+  let propertiesRes = copyProperties(properties)
+  if propertiesRes.isErr:
+    client.rememberCallbackError(propertiesRes.error)
     return
 
   var granted: seq[int] = @[]
@@ -120,22 +139,28 @@ proc onLowLevelSubscribe(mosq: ptr struct_mosquitto; userdata: pointer;
   client.emitControlEvent(LowLevelControlEvent(
     kind: lleSubscribed,
     mid: mid.int,
-    grantedQos: granted
+    grantedQos: granted,
+    properties: propertiesRes.get()
   ))
 
 proc onLowLevelUnsubscribe(mosq: ptr struct_mosquitto; userdata: pointer;
                            mid: cint;
                            properties: ptr mosquitto_property) {.cdecl.} =
   discard mosq
-  discard properties
 
   let client = clientFromUserdata(userdata)
   if client.isNil:
     return
 
+  let propertiesRes = copyProperties(properties)
+  if propertiesRes.isErr:
+    client.rememberCallbackError(propertiesRes.error)
+    return
+
   client.emitControlEvent(LowLevelControlEvent(
     kind: lleUnsubscribed,
-    mid: mid.int
+    mid: mid.int,
+    properties: propertiesRes.get()
   ))
 
 proc onLowLevelMessage(mosq: ptr struct_mosquitto; userdata: pointer;

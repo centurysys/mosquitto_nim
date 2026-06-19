@@ -1,6 +1,6 @@
 # Destination: src/mosquitto_nim/lowlevel/bridge.nim
 
-import std/options
+import std/[options, strformat]
 
 import results
 
@@ -42,8 +42,18 @@ const
     ## MQTT v5 Correlation Data identifier (0x09).
   MqttPropSessionExpiryIntervalId* = 17
     ## MQTT v5 Session Expiry Interval identifier (0x11).
+  MqttPropAssignedClientIdentifierId* = 18
+    ## MQTT v5 Assigned Client Identifier identifier (0x12).
+  MqttPropServerKeepAliveId* = 19
+    ## MQTT v5 Server Keep Alive identifier (0x13).
   MqttPropRequestProblemInformationId* = 23
     ## MQTT v5 Request Problem Information identifier (0x17).
+  MqttPropResponseInformationId* = 26
+    ## MQTT v5 Response Information identifier (0x1A).
+  MqttPropServerReferenceId* = 28
+    ## MQTT v5 Server Reference identifier (0x1C).
+  MqttPropReasonStringId* = 31
+    ## MQTT v5 Reason String identifier (0x1F).
   MqttPropReceiveMaximumId* = 33
     ## MQTT v5 Receive Maximum identifier (0x21).
   MqttPropUserPropertyId* = 38
@@ -131,6 +141,30 @@ proc copyByteProperty(properties: ptr mosquitto_property; identifier: cint;
 
   result = ok(MqttOk())
 
+proc copyInt16Property(properties: ptr mosquitto_property; identifier: cint;
+                       makeProperty: proc(value: uint16): MqttProperty;
+                       context: string;
+                       copied: var MqttProperties): MqttResult[MqttOk] =
+  ## Copy 16-bit integer MQTT v5 properties into Nim-owned MqttProperty values.
+  var cursor = properties
+  var skipFirst = false
+  while true:
+    var value: uint16 = 0
+    let found = mosquitto_property_read_int16(
+      cursor,
+      identifier,
+      addr value,
+      skipFirst
+    )
+    if found == nil:
+      break
+
+    copied.add(makeProperty(value))
+    cursor = found
+    skipFirst = true
+
+  result = ok(MqttOk())
+
 proc copyInt32Property(properties: ptr mosquitto_property; identifier: cint;
                        makeProperty: proc(value: uint32): MqttProperty;
                        context: string;
@@ -191,6 +225,12 @@ proc copyBinaryProperty(properties: ptr mosquitto_property; identifier: cint;
 proc copyPayloadFormatIndicatorProperty(value: uint8): MqttProperty =
   result = payloadFormatIndicator(value)
 
+proc copyServerKeepAliveProperty(value: uint16): MqttProperty =
+  result = serverKeepAlive(value)
+
+proc copyReceiveMaximumProperty(value: uint16): MqttProperty =
+  result = receiveMaximum(value)
+
 proc copyProperties*(properties: ptr mosquitto_property): MqttResult[MqttProperties] =
   ## Copy supported MQTT v5 properties from a libmosquitto property list.
   ##
@@ -229,6 +269,76 @@ proc copyProperties*(properties: ptr mosquitto_property): MqttResult[MqttPropert
   )
   if contentTypeRes.isErr:
     return err(contentTypeRes.error)
+
+  let assignedClientRes = copyStringProperty(
+    properties,
+    MqttPropAssignedClientIdentifierId.cint,
+    assignedClientIdentifier,
+    "MQTT v5 Assigned Client Identifier",
+    copied
+  )
+  if assignedClientRes.isErr:
+    return err(assignedClientRes.error)
+
+  let serverKeepAliveRes = copyInt16Property(
+    properties,
+    MqttPropServerKeepAliveId.cint,
+    copyServerKeepAliveProperty,
+    "MQTT v5 Server Keep Alive",
+    copied
+  )
+  if serverKeepAliveRes.isErr:
+    return err(serverKeepAliveRes.error)
+
+  let receiveMaximumRes = copyInt16Property(
+    properties,
+    MqttPropReceiveMaximumId.cint,
+    copyReceiveMaximumProperty,
+    "MQTT v5 Receive Maximum",
+    copied
+  )
+  if receiveMaximumRes.isErr:
+    return err(receiveMaximumRes.error)
+
+  let maximumPacketSizeRes = copyInt32Property(
+    properties,
+    MqttPropMaximumPacketSizeId.cint,
+    maximumPacketSize,
+    "MQTT v5 Maximum Packet Size",
+    copied
+  )
+  if maximumPacketSizeRes.isErr:
+    return err(maximumPacketSizeRes.error)
+
+  let reasonStringRes = copyStringProperty(
+    properties,
+    MqttPropReasonStringId.cint,
+    reasonString,
+    "MQTT v5 Reason String",
+    copied
+  )
+  if reasonStringRes.isErr:
+    return err(reasonStringRes.error)
+
+  let responseInformationRes = copyStringProperty(
+    properties,
+    MqttPropResponseInformationId.cint,
+    responseInformation,
+    "MQTT v5 Response Information",
+    copied
+  )
+  if responseInformationRes.isErr:
+    return err(responseInformationRes.error)
+
+  let serverReferenceRes = copyStringProperty(
+    properties,
+    MqttPropServerReferenceId.cint,
+    serverReference,
+    "MQTT v5 Server Reference",
+    copied
+  )
+  if serverReferenceRes.isErr:
+    return err(serverReferenceRes.error)
 
   let userRes = copyUserProperties(properties, copied)
   if userRes.isErr:
@@ -365,6 +475,11 @@ proc buildMosquittoProperties*(properties: MqttProperties;
       if addRes.isErr:
         mosquitto_property_free_all(addr raw)
         return err(addRes.error)
+    of mpAssignedClientIdentifier, mpServerKeepAlive, mpReceiveMaximum,
+       mpMaximumPacketSize, mpReasonString, mpResponseInformation,
+       mpServerReference:
+      mosquitto_property_free_all(addr raw)
+      return err(invalidArgument(context, &"{property.kind} is not valid for outgoing PUBLISH properties"))
     of mpUnknown:
       mosquitto_property_free_all(addr raw)
       return err(invalidArgument(context, "unknown MQTT property kind"))

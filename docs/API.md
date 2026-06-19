@@ -86,7 +86,20 @@ Currently supported for PUBLISH:
 - `payloadFormatIndicatorUtf8()`
 - `payloadFormatIndicatorUnspecified()`
 
-For new PUBLISH code, convert these helpers to `MqttPublishProperties` with `mqttPublishProperties(...)` and pass the typed container to `publishV5()`. The older `MqttProperties` overload remains available for compatibility.
+Currently copied from MQTT v5 CONNACK/control callbacks when libmosquitto provides them:
+
+- `assignedClientIdentifier(clientId)`
+- `serverKeepAlive(seconds)`
+- `receiveMaximum(maximum)`
+- `maximumPacketSize(bytes)`
+- `reasonString(value)`
+- `responseInformation(value)`
+- `serverReference(value)`
+- `userProperty(name, value)`
+
+These control properties are exposed on `MqttEvent.properties` for `mevConnected`, `mevDisconnected`, `mevPublishCompleted`, `mevSubscribed`, `mevUnsubscribed`, and connect-rejection `mevError` events. Highlevel and nmqtt-compatible clients also keep `lastConnectReasonCode()` and `lastConnectProperties()` for the most recent CONNACK-related data.
+
+For new PUBLISH code, convert publish helpers to `MqttPublishProperties` with `mqttPublishProperties(...)` and pass the typed container to `publishV5()`. The older `MqttProperties` overload remains available for compatibility.
 
 Typed containers added for API separation:
 

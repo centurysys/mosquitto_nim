@@ -55,6 +55,13 @@ type
     mpMessageExpiryInterval
     mpContentType
     mpPayloadFormatIndicator
+    mpAssignedClientIdentifier
+    mpServerKeepAlive
+    mpReceiveMaximum
+    mpMaximumPacketSize
+    mpReasonString
+    mpResponseInformation
+    mpServerReference
 
   MqttPayloadFormatIndicator* = enum
     ## MQTT v5 Payload Format Indicator values.
@@ -301,6 +308,50 @@ proc payloadFormatIndicatorUnspecified*(): MqttProperty =
   ## Construct Payload Format Indicator = unspecified/binary payload.
   result = payloadFormatIndicator(mpfiUnspecified)
 
+
+proc assignedClientIdentifier*(clientId: string): MqttProperty =
+  ## Construct an MQTT v5 Assigned Client Identifier property value.
+  ##
+  ## This is normally received from CONNACK when a broker assigns a client id.
+  result = MqttProperty(kind: mpAssignedClientIdentifier, value: clientId)
+
+proc serverKeepAlive*(seconds: uint16): MqttProperty =
+  ## Construct an MQTT v5 Server Keep Alive property value.
+  ##
+  ## This is normally received from CONNACK when the broker overrides keepalive.
+  result = MqttProperty(kind: mpServerKeepAlive, intValue: seconds.uint32)
+
+proc receiveMaximum*(maximum: uint16): MqttProperty =
+  ## Construct an MQTT v5 Receive Maximum property value.
+  ##
+  ## This is normally received from CONNACK to advertise the broker-side inbound
+  ## QoS1/QoS2 concurrency limit for this connection.
+  result = MqttProperty(kind: mpReceiveMaximum, intValue: maximum.uint32)
+
+proc maximumPacketSize*(bytes: uint32): MqttProperty =
+  ## Construct an MQTT v5 Maximum Packet Size property value.
+  ##
+  ## This is normally received from CONNACK to advertise the largest packet the
+  ## broker is willing to accept.
+  result = MqttProperty(kind: mpMaximumPacketSize, intValue: bytes)
+
+proc reasonString*(value: string): MqttProperty =
+  ## Construct an MQTT v5 Reason String property value.
+  ##
+  ## Brokers may return this in CONNACK/DISCONNECT/ACK packets to explain a
+  ## reason code in human-readable form.
+  result = MqttProperty(kind: mpReasonString, value: value)
+
+proc responseInformation*(value: string): MqttProperty =
+  ## Construct an MQTT v5 Response Information property value.
+  result = MqttProperty(kind: mpResponseInformation, value: value)
+
+proc serverReference*(value: string): MqttProperty =
+  ## Construct an MQTT v5 Server Reference property value.
+  ##
+  ## Brokers may return this in CONNACK/DISCONNECT to direct clients elsewhere.
+  result = MqttProperty(kind: mpServerReference, value: value)
+
 # ------------------------------------------------------------------------------
 # Typed MQTT v5 property containers
 # ------------------------------------------------------------------------------
@@ -439,6 +490,10 @@ proc buildMqttPublishProperties(properties: openArray[MqttProperty]): MqttResult
       typed.payloadFormatIndicator = some(indicatorRes.get())
     of mpUnknown:
       return err(invalidArgument("MQTT publish properties", "unknown property is not valid for PUBLISH"))
+    of mpAssignedClientIdentifier, mpServerKeepAlive, mpReceiveMaximum,
+       mpMaximumPacketSize, mpReasonString, mpResponseInformation,
+       mpServerReference:
+      return err(invalidArgument("MQTT publish properties", &"{property.kind} is not valid for PUBLISH"))
 
   result = ok(typed)
 
