@@ -49,6 +49,7 @@ type
     willMessage: string
     willQos: int
     willRetain: bool
+    reconnectPolicy: MqttReconnectPolicy
     connectTimeoutMs: int
     pumpSleepMs: int
     client: MqttClient
@@ -192,6 +193,7 @@ proc newMqttCtx*(clientId: string): MqttCtx =
   result.protocolVersion = mpv311
   result.cleanSession = true
   result.sslOn = false
+  result.reconnectPolicy = noReconnect()
   result.connectTimeoutMs = 5000
   result.pumpSleepMs = 1
   result.pending = emptyPendingOperations()
@@ -251,6 +253,42 @@ proc set_connect_timeout*(ctx: MqttCtx; timeoutMs: int) =
     ctx.raiseCompat(invalidArgument("set MQTT connect timeout", "timeout must be positive"))
   ctx.connectTimeoutMs = timeoutMs
 
+proc reconnectPolicy*(ctx: MqttCtx): MqttReconnectPolicy =
+  ## Return the reconnect policy that will be used for future starts/connects.
+  if ctx.isNil:
+    return noReconnect()
+  result = ctx.reconnectPolicy
+
+proc setReconnectPolicy*(ctx: MqttCtx;
+                         policy: MqttReconnectPolicy): MqttResult[MqttOk] =
+  ## Store reconnect policy configuration for future starts/connects.
+  ##
+  ## Step 24 validates and stores the policy only. Automatic reconnect itself is
+  ## intentionally left for the next implementation step.
+  if ctx.isNil:
+    return err(invalidState("set nmqtt reconnect policy", "context is nil"))
+
+  let validateRes = validateReconnectPolicy(policy, "set nmqtt reconnect policy")
+  if validateRes.isErr:
+    ctx.setLastError(validateRes.error)
+    return err(validateRes.error)
+
+  ctx.reconnectPolicy = policy
+  result = ok(MqttOk())
+
+proc enableReconnect*(ctx: MqttCtx; initialDelayMs = 1000;
+                      maxDelayMs = 30000; multiplier = 2.0): MqttResult[MqttOk] =
+  result = ctx.setReconnectPolicy(
+    mqttReconnectPolicy(
+      initialDelayMs = initialDelayMs,
+      maxDelayMs = maxDelayMs,
+      multiplier = multiplier
+    )
+  )
+
+proc disableReconnect*(ctx: MqttCtx): MqttResult[MqttOk] =
+  result = ctx.setReconnectPolicy(noReconnect())
+
 proc lastError*(ctx: MqttCtx): Option[MqttError] =
   if ctx.isNil:
     return none(MqttError)
@@ -273,6 +311,10 @@ proc connect*(ctx: MqttCtx) {.async.} =
   if ctx.willTopic.len > 0:
     let willQos = ctx.qosFromInt(ctx.willQos, "connect MQTT client will")
     will = mqttWill(ctx.willTopic, ctx.willMessage, qos = willQos, retain = ctx.willRetain)
+
+  let policyRes = ctx.client.setReconnectPolicy(ctx.reconnectPolicy)
+  if policyRes.isErr:
+    ctx.raiseCompat(policyRes.error)
 
   let connectRes = ctx.client.connect(
     ctx.host,

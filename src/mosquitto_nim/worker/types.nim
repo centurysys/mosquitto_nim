@@ -2,6 +2,8 @@
 
 import std/strformat
 
+import results
+
 import ../lowlevel/errors
 import ../lowlevel/types
 
@@ -43,6 +45,17 @@ type
     mevError
     mevStopped
 
+  MqttReconnectPolicy* = object
+    ## Reconnect configuration carried by connect commands.
+    ##
+    ## Step 24 only introduces the type and API plumbing. The worker stores this
+    ## policy for future reconnect handling, but it does not schedule automatic
+    ## reconnects yet.
+    enabled*: bool
+    initialDelayMs*: int
+    maxDelayMs*: int
+    multiplier*: float
+
   MqttCommand* = object
     ## Command sent to the MQTT worker.
     ##
@@ -55,6 +68,7 @@ type
     port*: int
     keepalive*: int
     protocolVersion*: MqttProtocolVersion
+    reconnectPolicy*: MqttReconnectPolicy
     username*: string
     password*: string
     tls*: MqttTlsConfig
@@ -104,6 +118,57 @@ proc isTerminal*(state: MqttConnectionState): bool {.inline.} =
   result = state in {mcsStopped, mcsError}
 
 # ------------------------------------------------------------------------------
+# Reconnect policy helpers
+# ------------------------------------------------------------------------------
+proc noReconnect*(): MqttReconnectPolicy =
+  result = MqttReconnectPolicy(
+    enabled: false,
+    initialDelayMs: 0,
+    maxDelayMs: 0,
+    multiplier: 1.0
+  )
+
+proc mqttReconnectPolicy*(initialDelayMs = 1000; maxDelayMs = 30000;
+                          multiplier = 2.0): MqttReconnectPolicy =
+  ## Construct an enabled reconnect policy.
+  ##
+  ## Validation is performed by validateReconnectPolicy() and by the highlevel /
+  ## nmqtt setter APIs. Keeping this constructor allocation-only allows tests to
+  ## build invalid values deliberately and verify validation paths.
+  result = MqttReconnectPolicy(
+    enabled: true,
+    initialDelayMs: initialDelayMs,
+    maxDelayMs: maxDelayMs,
+    multiplier: multiplier
+  )
+
+proc validateReconnectPolicy*(policy: MqttReconnectPolicy;
+                              context = "MQTT reconnect policy"): MqttResult[MqttOk] =
+  ## Validate reconnect policy values.
+  ##
+  ## Disabled policies are accepted regardless of delay fields because the worker
+  ## ignores them. Enabled policies must have a non-negative initial delay, a max
+  ## delay greater than or equal to the initial delay, and a multiplier of at least
+  ## 1.0.
+  if not policy.enabled:
+    return ok(MqttOk())
+
+  if policy.initialDelayMs < 0:
+    return err(invalidArgument(context, &"initialDelayMs must not be negative: {policy.initialDelayMs}"))
+  if policy.maxDelayMs < policy.initialDelayMs:
+    return err(invalidArgument(context, &"maxDelayMs must be >= initialDelayMs: {policy.maxDelayMs} < {policy.initialDelayMs}"))
+  if policy.multiplier < 1.0:
+    return err(invalidArgument(context, &"multiplier must be >= 1.0: {policy.multiplier}"))
+
+  result = ok(MqttOk())
+
+proc `$`*(policy: MqttReconnectPolicy): string =
+  if policy.enabled:
+    result = &"reconnect(enabled=true, initialDelayMs={policy.initialDelayMs}, maxDelayMs={policy.maxDelayMs}, multiplier={policy.multiplier})"
+  else:
+    result = "reconnect(enabled=false)"
+
+# ------------------------------------------------------------------------------
 # Pending operation helpers
 # ------------------------------------------------------------------------------
 proc pendingOperations*(publishes = 0; subscribes = 0; unsubscribes = 0): MqttPendingOperations =
@@ -139,6 +204,7 @@ proc payloadString*(command: MqttCommand): string =
 # ------------------------------------------------------------------------------
 proc connectCommand*(host: string; port = 1883; keepalive = 60;
                      protocolVersion = mpv311;
+                     reconnectPolicy: MqttReconnectPolicy = MqttReconnectPolicy(enabled: false, multiplier: 1.0);
                      username = ""; password = "";
                      tls: MqttTlsConfig = MqttTlsConfig(enabled: false);
                      will: MqttWill = MqttWill(enabled: false, qos: qos0);
@@ -150,6 +216,7 @@ proc connectCommand*(host: string; port = 1883; keepalive = 60;
     port: port,
     keepalive: keepalive,
     protocolVersion: protocolVersion,
+    reconnectPolicy: reconnectPolicy,
     username: username,
     password: password,
     tls: tls,
@@ -296,7 +363,8 @@ proc summary*(command: MqttCommand): string =
     let auth = if command.username.len > 0: ", auth=true" else: ""
     let tls = if command.tls.enabled: ", tls=true" else: ""
     let will = if command.will.enabled: ", will=true" else: ""
-    result = &"{command.kind}(id={command.id}, host={command.host}, port={command.port}, protocol={command.protocolVersion}{auth}{tls}{will})"
+    let reconnect = if command.reconnectPolicy.enabled: ", reconnect=true" else: ""
+    result = &"{command.kind}(id={command.id}, host={command.host}, port={command.port}, protocol={command.protocolVersion}{auth}{tls}{will}{reconnect})"
   of mckPublish:
     let props = if command.properties.len > 0: &", properties={command.properties.len}" else: ""
     result = &"{command.kind}(id={command.id}, topic={command.topic}, payloadLen={command.payload.len}, qos={command.qos}, retain={command.retain}{props})"

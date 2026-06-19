@@ -174,6 +174,7 @@ suite "mosquitto_nim worker value types":
       port = 1883,
       keepalive = 30,
       protocolVersion = mpv5,
+      reconnectPolicy = mqttReconnectPolicy(initialDelayMs = 250, maxDelayMs = 4000, multiplier = 1.5),
       username = "worker-user",
       password = "worker-pass",
       tls = mqttTls(certfile = "worker.crt", keyfile = "worker.key"),
@@ -183,10 +184,15 @@ suite "mosquitto_nim worker value types":
     check connectCmd.username == "worker-user"
     check connectCmd.password == "worker-pass"
     check connectCmd.protocolVersion == mpv5
+    check connectCmd.reconnectPolicy.enabled
+    check connectCmd.reconnectPolicy.initialDelayMs == 250
+    check connectCmd.reconnectPolicy.maxDelayMs == 4000
+    check connectCmd.reconnectPolicy.multiplier == 1.5
     check connectCmd.tls.enabled
     check connectCmd.tls.certfile == "worker.crt"
     check connectCmd.summary().contains("auth=true")
     check connectCmd.summary().contains("tls=true")
+    check connectCmd.summary().contains("reconnect=true")
 
     let will = mqttWill("mosquitto_nim/will", "offline", qos1, retain = true)
     let willConnectCmd = connectCommand("127.0.0.1", will = will, id = 8)
@@ -288,6 +294,50 @@ suite "mosquitto_nim worker lifecycle":
               check event.error.kind == meInvalidArgument
           of mevStopped:
             if event.commandId == 92:
+              sawStopped = true
+          else:
+            discard
+
+          if sawError and sawStopped:
+            break
+
+        sleep(10)
+
+      check sawError
+      check sawStopped
+      check worker.joinMqttWorker().isOk
+
+  test "worker validates reconnect policy before connect attempts":
+    let workerRes = startMqttWorker("mosquitto_nim_step24_worker_reconnect_error")
+    check workerRes.isOk
+
+    if workerRes.isOk:
+      let worker = workerRes.get()
+      let invalidPolicy = MqttReconnectPolicy(
+        enabled: true,
+        initialDelayMs: 2000,
+        maxDelayMs: 1000,
+        multiplier: 2.0
+      )
+      check worker.sendCommand(connectCommand("127.0.0.1", reconnectPolicy = invalidPolicy, id = 93)).isOk
+      check worker.requestStop(id = 94).isOk
+
+      var sawError = false
+      var sawStopped = false
+      for _ in 0 ..< 100:
+        var event: MqttEvent
+        let recvRes = worker.tryReceiveEvent(event)
+        check recvRes.isOk
+
+        if recvRes.isOk and recvRes.get():
+          case event.kind
+          of mevError:
+            if event.commandId == 93:
+              sawError = true
+              check event.error.kind == meInvalidArgument
+              check event.error.message.contains("maxDelayMs")
+          of mevStopped:
+            if event.commandId == 94:
               sawStopped = true
           else:
             discard
@@ -1449,6 +1499,107 @@ when getEnv("MOSQUITTO_NIM_TEST_BROKER") == "1":
         return connectedEvent.isSome and disconnectedEvent.isSome and stoppedEvent.isSome
 
       check waitFor scenario()
+
+suite "mosquitto_nim reconnect policy API":
+  test "reconnect policy helpers validate enabled settings":
+    let disabled = noReconnect()
+    check not disabled.enabled
+    check disabled.validateReconnectPolicy().isOk
+    check ($disabled).contains("enabled=false")
+
+    let enabled = mqttReconnectPolicy(initialDelayMs = 100, maxDelayMs = 5000, multiplier = 1.5)
+    check enabled.enabled
+    check enabled.initialDelayMs == 100
+    check enabled.maxDelayMs == 5000
+    check enabled.multiplier == 1.5
+    check enabled.validateReconnectPolicy().isOk
+    check ($enabled).contains("initialDelayMs=100")
+
+    check validateReconnectPolicy(MqttReconnectPolicy(
+      enabled: true,
+      initialDelayMs: -1,
+      maxDelayMs: 1000,
+      multiplier: 2.0
+    )).isErr
+    check validateReconnectPolicy(MqttReconnectPolicy(
+      enabled: true,
+      initialDelayMs: 2000,
+      maxDelayMs: 1000,
+      multiplier: 2.0
+    )).isErr
+    check validateReconnectPolicy(MqttReconnectPolicy(
+      enabled: true,
+      initialDelayMs: 1000,
+      maxDelayMs: 1000,
+      multiplier: 0.5
+    )).isErr
+
+  test "highlevel client stores reconnect policy for future connect commands":
+    let clientRes = startMqttClient("mosquitto_nim_step24_reconnect_policy", pollMs = 1)
+    check clientRes.isOk
+
+    if clientRes.isOk:
+      let client = clientRes.get()
+      check not client.reconnectPolicy().enabled
+
+      let policy = mqttReconnectPolicy(initialDelayMs = 250, maxDelayMs = 8000, multiplier = 2.5)
+      check client.setReconnectPolicy(policy).isOk
+      check client.reconnectPolicy().enabled
+      check client.reconnectPolicy().initialDelayMs == 250
+      check client.reconnectPolicy().maxDelayMs == 8000
+      check client.reconnectPolicy().multiplier == 2.5
+
+      check client.setReconnectPolicy(MqttReconnectPolicy(
+        enabled: true,
+        initialDelayMs: 1000,
+        maxDelayMs: 500,
+        multiplier: 2.0
+      )).isErr
+      check client.reconnectPolicy().maxDelayMs == 8000
+
+      check client.disableReconnect().isOk
+      check not client.reconnectPolicy().enabled
+
+      let stopRes = client.requestStop()
+      check stopRes.isOk
+      if stopRes.isOk:
+        var sawStopped = false
+        for _ in 0 ..< 100:
+          let drainRes = client.drainEvents()
+          check drainRes.isOk
+          if drainRes.isOk:
+            for event in drainRes.get():
+              if event.kind == mevStopped and event.commandId == stopRes.get():
+                sawStopped = true
+                break
+          if sawStopped:
+            break
+          sleep(10)
+        check sawStopped
+
+      check client.joinMqttClient().isOk
+
+  test "nmqtt compatibility context stores reconnect policy":
+    let ctx = newMqttCtx("mosquitto_nim_step24_reconnect_nmqtt")
+    check not ctx.reconnectPolicy().enabled
+    check ctx.enableReconnect(initialDelayMs = 300, maxDelayMs = 9000, multiplier = 3.0).isOk
+    check ctx.reconnectPolicy().enabled
+    check ctx.reconnectPolicy().initialDelayMs == 300
+    check ctx.reconnectPolicy().maxDelayMs == 9000
+    check ctx.reconnectPolicy().multiplier == 3.0
+
+    let invalidRes = ctx.setReconnectPolicy(MqttReconnectPolicy(
+      enabled: true,
+      initialDelayMs: 1000,
+      maxDelayMs: 1000,
+      multiplier: 0.75
+    ))
+    check invalidRes.isErr
+    check ctx.lastError().isSome
+    check ctx.reconnectPolicy().multiplier == 3.0
+
+    check ctx.disableReconnect().isOk
+    check not ctx.reconnectPolicy().enabled
 
 suite "mosquitto_nim pending operation tracking":
   test "pending operation snapshots summarize in-flight operations":

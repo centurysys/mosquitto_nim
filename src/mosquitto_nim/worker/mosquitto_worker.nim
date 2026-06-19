@@ -119,6 +119,7 @@ proc flushLoop(client: LowLevelClient; eventQueue: ThreadQueue[MqttEvent];
 proc handleCommand(command: sink MqttCommand; running: var bool;
                    loopActive: var bool; pendingConnectId: var int;
                    pendingDisconnectId: var int;
+                   reconnectPolicy: var MqttReconnectPolicy;
                    pendingPublishes: var Table[int, int];
                    pendingSubscribes: var Table[int, int];
                    pendingUnsubscribes: var Table[int, int];
@@ -152,6 +153,13 @@ proc handleCommand(command: sink MqttCommand; running: var bool;
         cmd.id
       )
       return
+
+    let reconnectRes = validateReconnectPolicy(cmd.reconnectPolicy, "MQTT worker reconnect policy")
+    if reconnectRes.isErr:
+      pendingConnectId = 0
+      sendWorkerError(eventQueue, reconnectRes.error, cmd.id)
+      return
+    reconnectPolicy = cmd.reconnectPolicy
 
     let protoRes = setProtocolVersion(client, cmd.protocolVersion)
     if protoRes.isErr:
@@ -289,6 +297,7 @@ proc workerMain(args: MqttWorkerArgs) {.thread.} =
   var running = true
   var pendingConnectId = 0
   var pendingDisconnectId = 0
+  var reconnectPolicy = noReconnect()
   var pendingPublishes = initTable[int, int]()
   var pendingSubscribes = initTable[int, int]()
   var pendingUnsubscribes = initTable[int, int]()
@@ -378,6 +387,7 @@ proc workerMain(args: MqttWorkerArgs) {.thread.} =
         loopActive,
         pendingConnectId,
         pendingDisconnectId,
+        reconnectPolicy,
         pendingPublishes,
         pendingSubscribes,
         pendingUnsubscribes,

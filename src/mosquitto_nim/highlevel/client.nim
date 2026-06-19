@@ -43,6 +43,7 @@ type
     nextCommandId: int
     state: MqttConnectionState
     pending: MqttPendingOperations
+    reconnectPolicy: MqttReconnectPolicy
     closed: bool
 
 # ------------------------------------------------------------------------------
@@ -144,6 +145,7 @@ proc startMqttClient*(clientId = ""; cleanSession = true;
   client.nextCommandId = 0
   client.state = mcsDisconnected
   client.pending = emptyPendingOperations()
+  client.reconnectPolicy = noReconnect()
   client.closed = false
   result = ok(client)
 
@@ -180,6 +182,42 @@ proc pendingTotal*(client: MqttClient): int {.inline.} =
 proc msgQueue*(client: MqttClient): int {.inline.} =
   ## Compatibility/debug helper returning the latest pending operation total.
   result = client.pendingTotal()
+
+proc reconnectPolicy*(client: MqttClient): MqttReconnectPolicy {.inline.} =
+  ## Return the reconnect policy that will be attached to future connect commands.
+  if client.isNil:
+    return noReconnect()
+  result = client.reconnectPolicy
+
+proc setReconnectPolicy*(client: MqttClient;
+                         policy: MqttReconnectPolicy): MqttResult[MqttOk] =
+  ## Store a reconnect policy for future connect commands.
+  ##
+  ## Step 24 only performs validation and plumbing. Automatic reconnect attempts are
+  ## intentionally not scheduled yet.
+  let openRes = client.ensureOpen("set MQTT reconnect policy")
+  if openRes.isErr:
+    return err(openRes.error)
+
+  let validateRes = validateReconnectPolicy(policy, "set MQTT reconnect policy")
+  if validateRes.isErr:
+    return err(validateRes.error)
+
+  client.reconnectPolicy = policy
+  result = ok(MqttOk())
+
+proc enableReconnect*(client: MqttClient; initialDelayMs = 1000;
+                      maxDelayMs = 30000; multiplier = 2.0): MqttResult[MqttOk] =
+  result = client.setReconnectPolicy(
+    mqttReconnectPolicy(
+      initialDelayMs = initialDelayMs,
+      maxDelayMs = maxDelayMs,
+      multiplier = multiplier
+    )
+  )
+
+proc disableReconnect*(client: MqttClient): MqttResult[MqttOk] =
+  result = client.setReconnectPolicy(noReconnect())
 
 proc joinMqttClient*(client: MqttClient): MqttResult[MqttOk] =
   ## Join the worker thread after a Stop command has been processed.
@@ -288,6 +326,7 @@ proc connect*(client: MqttClient; host: string; port = 1883;
               username = ""; password = "";
               tls: MqttTlsConfig = MqttTlsConfig(enabled: false);
               will: MqttWill = MqttWill(enabled: false, qos: qos0)): MqttResult[int] =
+  let policy = if client.isNil: noReconnect() else: client.reconnectPolicy
   var cmd = connectCommand(
     host,
     port = port,
@@ -296,7 +335,8 @@ proc connect*(client: MqttClient; host: string; port = 1883;
     username = username,
     password = password,
     tls = tls,
-    will = will
+    will = will,
+    reconnectPolicy = policy
   )
   result = client.sendClientCommand(move cmd, "connect MQTT client")
   if result.isOk:
