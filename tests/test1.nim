@@ -129,6 +129,26 @@ suite "mosquitto_nim lowlevel smoke test":
     check cleanupLibrary().isOk
 
 
+  test "TLS config can be represented and applied as a no-op when disabled":
+    let tls = mqttTls(certfile = "client.crt", keyfile = "client.key")
+    check tls.enabled
+    check tls.certfile == "client.crt"
+    check tls.keyfile == "client.key"
+
+    check initLibrary().isOk
+
+    let clientRes = newLowLevelClient("mosquitto_nim_step16_tls")
+    check clientRes.isOk
+    let client = clientRes.get()
+
+    # noTls() is intentionally a no-op.  This keeps optional TLS settings easy to
+    # apply from worker/highlevel code without special-casing disabled TLS.
+    check setTls(client, noTls()).isOk
+
+    check closeLowLevelClient(client).isOk
+    check cleanupLibrary().isOk
+
+
 suite "mosquitto_nim worker value types":
   test "worker command constructors keep Nim-owned payload bytes":
     let connectCmd = connectCommand(
@@ -137,12 +157,16 @@ suite "mosquitto_nim worker value types":
       keepalive = 30,
       username = "worker-user",
       password = "worker-pass",
+      tls = mqttTls(certfile = "worker.crt", keyfile = "worker.key"),
       id = 6
     )
     check connectCmd.kind == mckConnect
     check connectCmd.username == "worker-user"
     check connectCmd.password == "worker-pass"
+    check connectCmd.tls.enabled
+    check connectCmd.tls.certfile == "worker.crt"
     check connectCmd.summary().contains("auth=true")
+    check connectCmd.summary().contains("tls=true")
 
     let will = mqttWill("mosquitto_nim/will", "offline", qos1, retain = true)
     let willConnectCmd = connectCommand("127.0.0.1", will = will, id = 8)

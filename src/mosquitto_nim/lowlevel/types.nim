@@ -23,6 +23,19 @@ type
 
   MqttRetain* = bool
 
+  MqttTlsConfig* = object
+    ## Nim-owned TLS configuration for libmosquitto.
+    ##
+    ## The strings are kept in Nim-owned memory until the worker applies them to
+    ## libmosquitto before connecting.  Empty strings are passed as nil so the
+    ## caller can use only the pieces needed by its broker setup.
+    enabled*: bool
+    cafile*: string
+    capath*: string
+    certfile*: string
+    keyfile*: string
+    insecure*: bool
+
   MqttWill* = object
     ## Nim-owned MQTT Will configuration.
     ##
@@ -121,6 +134,20 @@ proc bytesFromString*(payload: string): seq[byte] =
 
   result = newSeq[byte](payload.len)
   copyMem(addr result[0], unsafeAddr payload[0], payload.len)
+
+proc noTls*(): MqttTlsConfig =
+  result = MqttTlsConfig(enabled: false)
+
+proc mqttTls*(cafile = ""; capath = ""; certfile = ""; keyfile = "";
+              insecure = false): MqttTlsConfig =
+  result = MqttTlsConfig(
+    enabled: true,
+    cafile: cafile,
+    capath: capath,
+    certfile: certfile,
+    keyfile: keyfile,
+    insecure: insecure
+  )
 
 proc noWill*(): MqttWill =
   result = MqttWill(enabled: false, qos: qos0)

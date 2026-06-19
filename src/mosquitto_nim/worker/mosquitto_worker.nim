@@ -116,6 +116,12 @@ proc handleCommand(command: sink MqttCommand; running: var bool;
       )
       return
 
+    let tlsRes = setTls(client, cmd.tls)
+    if tlsRes.isErr:
+      pendingConnectId = 0
+      sendWorkerError(eventQueue, tlsRes.error, cmd.id)
+      return
+
     let authRes = setUsernamePassword(client, cmd.username, cmd.password)
     if authRes.isErr:
       pendingConnectId = 0

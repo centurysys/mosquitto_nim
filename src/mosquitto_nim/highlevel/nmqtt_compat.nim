@@ -82,11 +82,12 @@ proc qosFromInt(ctx: MqttCtx; qos: int; context: string): MqttQos =
 
 proc ensureSupportedConfig(ctx: MqttCtx) =
   ## Keep unsupported nmqtt settings explicit instead of silently ignoring them.
-  ## Lowlevel support can be wired later without changing the compatibility API.
-  if ctx.sslOn:
-    ctx.raiseCompat(invalidState("start nmqtt-compatible client", "SSL/TLS is not wired yet"))
-  if ctx.sslCert.len > 0 or ctx.sslKey.len > 0:
-    ctx.raiseCompat(invalidState("start nmqtt-compatible client", "client certificate auth is not wired yet"))
+  ## TLS certificate configuration is wired through lowlevel/worker now.
+  if ctx.sslKey.len > 0 and ctx.sslCert.len == 0:
+    ctx.raiseCompat(invalidArgument(
+      "start nmqtt-compatible client",
+      "SSL key cannot be set without SSL certificate"
+    ))
 
 proc ensureClient(ctx: MqttCtx) =
   ctx.requireCtx("ensure nmqtt-compatible client")
@@ -238,6 +239,10 @@ proc connect*(ctx: MqttCtx) {.async.} =
     return
 
   ctx.ensureClient()
+  var tls = noTls()
+  if ctx.sslOn or ctx.sslCert.len > 0 or ctx.sslKey.len > 0:
+    tls = mqttTls(certfile = ctx.sslCert, keyfile = ctx.sslKey)
+
   var will = noWill()
   if ctx.willTopic.len > 0:
     let willQos = ctx.qosFromInt(ctx.willQos, "connect MQTT client will")
@@ -249,6 +254,7 @@ proc connect*(ctx: MqttCtx) {.async.} =
     keepalive = ctx.keepalive,
     username = ctx.username,
     password = ctx.password,
+    tls = tls,
     will = will
   )
   if connectRes.isErr:

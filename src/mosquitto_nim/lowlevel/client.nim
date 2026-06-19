@@ -266,6 +266,49 @@ proc clearCallbackError*(client: LowLevelClient): MqttResult[MqttOk] =
   result = ok(MqttOk())
 
 
+proc optionalCString(value: string): cstring =
+  ## Convert an optional Nim string to the nil-or-cstring style used by
+  ## libmosquitto configuration APIs.
+  if value.len == 0:
+    return nil
+  result = value.cstring
+
+proc setTls*(client: LowLevelClient; config: MqttTlsConfig): MqttResult[MqttOk] =
+  ## Configure certificate based TLS on the libmosquitto handle.
+  ##
+  ## This must be called before connectLowLevelClient(). Passing noTls() is a
+  ## no-op so higher layers can unconditionally apply optional TLS settings.
+  if not config.enabled:
+    return ok(MqttOk())
+
+  let rawRes = requireOpen(client, "set MQTT TLS")
+  if rawRes.isErr:
+    return err(rawRes.error)
+
+  let tlsRes = checkMosq(
+    mosquitto_tls_set(
+      rawRes.get(),
+      optionalCString(config.cafile),
+      optionalCString(config.capath),
+      optionalCString(config.certfile),
+      optionalCString(config.keyfile),
+      nil
+    ),
+    "mosquitto_tls_set"
+  )
+  if tlsRes.isErr:
+    return err(tlsRes.error)
+
+  if config.insecure:
+    let insecureRes = checkMosq(
+      mosquitto_tls_insecure_set(rawRes.get(), true),
+      "mosquitto_tls_insecure_set"
+    )
+    if insecureRes.isErr:
+      return err(insecureRes.error)
+
+  result = ok(MqttOk())
+
 proc setUsernamePassword*(client: LowLevelClient; username: string;
                           password = ""): MqttResult[MqttOk] =
   ## Configure username/password authentication on the libmosquitto handle.

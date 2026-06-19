@@ -45,6 +45,7 @@ type
     keepalive*: int
     username*: string
     password*: string
+    tls*: MqttTlsConfig
     will*: MqttWill
     topic*: string
     payload*: seq[byte]
@@ -85,6 +86,7 @@ proc payloadString*(command: MqttCommand): string =
 # ------------------------------------------------------------------------------
 proc connectCommand*(host: string; port = 1883; keepalive = 60;
                      username = ""; password = "";
+                     tls: MqttTlsConfig = MqttTlsConfig(enabled: false);
                      will: MqttWill = MqttWill(enabled: false, qos: qos0);
                      id = 0): MqttCommand =
   result = MqttCommand(
@@ -95,6 +97,7 @@ proc connectCommand*(host: string; port = 1883; keepalive = 60;
     keepalive: keepalive,
     username: username,
     password: password,
+    tls: tls,
     will: will,
     qos: qos0
   )
@@ -202,8 +205,9 @@ proc summary*(command: MqttCommand): string =
   case command.kind
   of mckConnect:
     let auth = if command.username.len > 0: ", auth=true" else: ""
+    let tls = if command.tls.enabled: ", tls=true" else: ""
     let will = if command.will.enabled: ", will=true" else: ""
-    result = &"{command.kind}(id={command.id}, host={command.host}, port={command.port}{auth}{will})"
+    result = &"{command.kind}(id={command.id}, host={command.host}, port={command.port}{auth}{tls}{will})"
   of mckPublish:
     result = &"{command.kind}(id={command.id}, topic={command.topic}, payloadLen={command.payload.len}, qos={command.qos}, retain={command.retain})"
   of mckSubscribe, mckUnsubscribe:
