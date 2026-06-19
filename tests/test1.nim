@@ -900,3 +900,62 @@ when getEnv("MOSQUITTO_NIM_TEST_BROKER") == "1":
         return sawMessage and handlerTopic == topic and handlerPayload == "hello-handler"
 
       check waitFor scenario()
+
+
+suite "mosquitto_nim nmqtt compatibility facade":
+  test "nmqtt context stores basic configuration":
+    let ctx = newMqttCtx("mosquitto_nim_step13_config")
+    check not ctx.isConnected()
+    check ctx.msgQueue() == 0
+    ctx.set_host("127.0.0.1", 1883)
+    ctx.set_ping_interval(30)
+    check ctx.lastError().isNone
+
+
+when getEnv("MOSQUITTO_NIM_TEST_BROKER") == "1":
+  suite "mosquitto_nim nmqtt compatibility broker test":
+    test "nmqtt-style start subscribe publish callback disconnect works":
+      proc scenario(): Future[bool] {.async.} =
+        let host = getEnv("MOSQUITTO_NIM_TEST_HOST", "127.0.0.1")
+        let port = parseInt(getEnv("MOSQUITTO_NIM_TEST_PORT", "1883"))
+        let topic = "mosquitto_nim/step13/nmqtt_compat/" & $getTime().toUnix() & "_" & $getCurrentProcessId()
+
+        let ctx = newMqttCtx("mosquitto_nim_step13_nmqtt")
+        ctx.set_host(host, port)
+        ctx.set_ping_interval(30)
+
+        var receivedTopic = ""
+        var receivedPayload = ""
+        proc onData(topic: string; message: string) =
+          receivedTopic = topic
+          receivedPayload = message
+
+        await ctx.start()
+        check ctx.isConnected()
+
+        await ctx.subscribe(topic, 1, onData)
+        await sleepAsync(100)
+
+        await ctx.publish(topic, "hello-nmqtt-compat", 1, retain = false)
+
+        for _ in 0 ..< 400:
+          if receivedPayload == "hello-nmqtt-compat":
+            break
+          await sleepAsync(10)
+
+        check receivedTopic == topic
+        check receivedPayload == "hello-nmqtt-compat"
+
+        for _ in 0 ..< 400:
+          if ctx.msgQueue() == 0:
+            break
+          await sleepAsync(10)
+        check ctx.msgQueue() == 0
+
+        await ctx.unsubscribe(topic)
+        await sleepAsync(50)
+        await ctx.disconnect()
+        check not ctx.isConnected()
+        return receivedTopic == topic and receivedPayload == "hello-nmqtt-compat"
+
+      check waitFor scenario()

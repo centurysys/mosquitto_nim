@@ -1,5 +1,4 @@
 # Destination: src/mosquitto_nim.nim
-
 import ./mosquitto_nim/lowlevel/[
   client,
   errors,
@@ -11,6 +10,7 @@ import ./mosquitto_nim/worker/mosquitto_worker
 import ./mosquitto_nim/highlevel/async_bridge
 import ./mosquitto_nim/highlevel/dispatcher
 import ./mosquitto_nim/highlevel/client as highlevel_client
+import ./mosquitto_nim/highlevel/nmqtt_compat
 
 export client
 export errors
@@ -21,3 +21,4 @@ export mosquitto_worker
 export async_bridge
 export dispatcher
 export highlevel_client
+export nmqtt_compat
