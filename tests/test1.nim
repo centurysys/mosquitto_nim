@@ -6,6 +6,7 @@ import results
 
 import mosquitto_nim
 import mosquitto_nim/worker/types
+import mosquitto_nim/worker/mosquitto_worker
 import mosquitto_nim/lowlevel/bridge
 import mosquitto_nim/lowlevel/bindings/c_api
 
@@ -126,6 +127,72 @@ suite "mosquitto_nim worker value types":
 
     check cmd.summary().contains("127.0.0.1")
     check ev.summary().contains("commandId=1")
+
+
+suite "mosquitto_nim worker lifecycle":
+  test "worker can start, receive stop command, and emit stopped event":
+    let workerRes = startMqttWorker("mosquitto_nim_step6_worker")
+    check workerRes.isOk
+
+    if workerRes.isOk:
+      let worker = workerRes.get()
+      check worker.isStarted
+      check worker.requestStop(id = 77).isOk
+
+      var stopped = false
+      for _ in 0 ..< 100:
+        var event: MqttEvent
+        let recvRes = worker.tryReceiveEvent(event)
+        check recvRes.isOk
+
+        if recvRes.isOk and recvRes.get():
+          if event.kind == mevStopped:
+            check event.commandId == 77
+            stopped = true
+            break
+
+        sleep(10)
+
+      check stopped
+      check worker.joinMqttWorker().isOk
+      check not worker.isStarted
+
+  test "worker reports unimplemented commands as error events":
+    let workerRes = startMqttWorker("mosquitto_nim_step6_worker_error")
+    check workerRes.isOk
+
+    if workerRes.isOk:
+      let worker = workerRes.get()
+      check worker.sendCommand(connectCommand("127.0.0.1", id = 91)).isOk
+      check worker.requestStop(id = 92).isOk
+
+      var sawError = false
+      var sawStopped = false
+      for _ in 0 ..< 100:
+        var event: MqttEvent
+        let recvRes = worker.tryReceiveEvent(event)
+        check recvRes.isOk
+
+        if recvRes.isOk and recvRes.get():
+          case event.kind
+          of mevError:
+            if event.commandId == 91:
+              sawError = true
+              check event.error.kind == meInvalidState
+          of mevStopped:
+            if event.commandId == 92:
+              sawStopped = true
+          else:
+            discard
+
+          if sawError and sawStopped:
+            break
+
+        sleep(10)
+
+      check sawError
+      check sawStopped
+      check worker.joinMqttWorker().isOk
 
 when getEnv("MOSQUITTO_NIM_TEST_BROKER") == "1":
   suite "mosquitto_nim lowlevel broker smoke test":

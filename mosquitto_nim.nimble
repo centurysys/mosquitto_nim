@@ -11,5 +11,6 @@ srcDir        = "src"
 
 requires "nim >= 2.2.10"
 requires "results >= 0.5.1"
+requires "threading >= 0.1.1"
 
 requires "threadtools >= 0.1.0"
