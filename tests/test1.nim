@@ -1,6 +1,6 @@
 # Destination: tests/test1.nim
 
-import std/unittest
+import std/[os, strutils, unittest]
 
 import results
 
@@ -27,7 +27,7 @@ suite "mosquitto_nim lowlevel smoke test":
   test "lowlevel client can be created and destroyed":
     check initLibrary().isOk
 
-    let clientRes = newLowLevelClient("mosquitto_nim_step2")
+    let clientRes = newLowLevelClient("mosquitto_nim_step3")
     check clientRes.isOk
 
     let client = clientRes.get()
@@ -59,3 +59,41 @@ suite "mosquitto_nim lowlevel smoke test":
     check msg.qos == qos1
     check msg.retain
     check not msg.dup
+
+  test "topic validation distinguishes publish topics and subscribe filters":
+    check validatePublishTopic("mosquitto_nim/test").isOk
+    check validatePublishTopic("mosquitto_nim/+").isErr
+    check validatePublishTopic("").isErr
+
+    check validateSubscribeTopic("mosquitto_nim/test").isOk
+    check validateSubscribeTopic("mosquitto_nim/+").isOk
+    check validateSubscribeTopic("").isErr
+
+when getEnv("MOSQUITTO_NIM_TEST_BROKER") == "1":
+  suite "mosquitto_nim lowlevel broker smoke test":
+    test "manual loop can connect, subscribe, publish, and disconnect":
+      let host = getEnv("MOSQUITTO_NIM_TEST_HOST", "127.0.0.1")
+      let port = parseInt(getEnv("MOSQUITTO_NIM_TEST_PORT", "1883"))
+
+      check initLibrary().isOk
+
+      let clientRes = newLowLevelClient("mosquitto_nim_step3_broker")
+      check clientRes.isOk
+      let client = clientRes.get()
+
+      check connectLowLevelClient(client, host, port).isOk
+      for _ in 0 ..< 5:
+        check loopLowLevelClient(client, timeoutMs = 20).isOk
+
+      let subRes = subscribeLowLevelClient(client, "mosquitto_nim/step3/#", qos1)
+      check subRes.isOk
+
+      let pubRes = publishLowLevelClient(client, "mosquitto_nim/step3/hello", "hello", qos1)
+      check pubRes.isOk
+
+      for _ in 0 ..< 10:
+        check loopLowLevelClient(client, timeoutMs = 20).isOk
+
+      discard disconnectLowLevelClient(client)
+      discard closeLowLevelClient(client)
+      check cleanupLibrary().isOk
