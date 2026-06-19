@@ -5,6 +5,7 @@ import std/[options, os, strutils, times, unittest]
 import results
 
 import mosquitto_nim
+import mosquitto_nim/worker/types
 import mosquitto_nim/lowlevel/bridge
 import mosquitto_nim/lowlevel/bindings/c_api
 
@@ -86,6 +87,45 @@ suite "mosquitto_nim lowlevel smoke test":
     check closeLowLevelClient(client).isOk
 
     check cleanupLibrary().isOk
+
+
+
+suite "mosquitto_nim worker value types":
+  test "worker command constructors keep Nim-owned payload bytes":
+    let cmd = publishCommand("mosquitto_nim/worker/test", "hello-worker", qos1, retain = true, id = 7)
+
+    check cmd.kind == mckPublish
+    check cmd.id == 7
+    check cmd.topic == "mosquitto_nim/worker/test"
+    check cmd.payloadString() == "hello-worker"
+    check cmd.qos == qos1
+    check cmd.retain
+
+  test "worker event constructors keep message data in Nim-owned values":
+    var msg = MqttMessage(
+      mid: 11,
+      topic: "mosquitto_nim/worker/event",
+      payload: bytesFromString("event-payload"),
+      qos: qos1,
+      retain: false,
+      dup: false,
+      properties: @[]
+    )
+
+    let ev = messageReceivedEvent(move msg, commandId = 9)
+
+    check ev.kind == mevMessageReceived
+    check ev.commandId == 9
+    check ev.message.topic == "mosquitto_nim/worker/event"
+    check ev.message.payloadString() == "event-payload"
+    check ev.message.qos == qos1
+
+  test "worker command and event summaries are available":
+    let cmd = connectCommand("127.0.0.1", port = 1883, keepalive = 30, id = 1)
+    let ev = connectedEvent(commandId = 1)
+
+    check cmd.summary().contains("127.0.0.1")
+    check ev.summary().contains("commandId=1")
 
 when getEnv("MOSQUITTO_NIM_TEST_BROKER") == "1":
   suite "mosquitto_nim lowlevel broker smoke test":
