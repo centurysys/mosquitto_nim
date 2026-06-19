@@ -50,16 +50,20 @@ type
   MqttPropertyKind* = enum
     mpUnknown
     mpUserProperty
+    mpResponseTopic
+    mpCorrelationData
 
   MqttProperty* = object
     ## Nim-owned MQTT v5 property.
     ##
-    ## This first property model intentionally starts small.  User Property is
-    ## the most useful generic extension point and can be sent with PUBLISH
-    ## without changing nmqtt-compatible publish semantics.
+    ## This property model intentionally stores values in Nim-owned memory.
+    ## User Property uses name/value, Response Topic uses value, and Correlation
+    ## Data uses data.  Raw libmosquitto property pointers must not escape into
+    ## this type.
     kind*: MqttPropertyKind
     name*: string
     value*: string
+    data*: seq[byte]
 
   MqttProperties* = seq[MqttProperty]
 
@@ -189,8 +193,35 @@ proc userProperty*(name, value: string): MqttProperty =
   ## constructor remains allocation-only and does not raise.
   result = MqttProperty(kind: mpUserProperty, name: name, value: value)
 
+
+proc responseTopic*(topic: string): MqttProperty =
+  ## Construct an MQTT v5 Response Topic property.
+  ##
+  ## The topic name is validated when the property is converted to a libmosquitto
+  ## property list.
+  result = MqttProperty(kind: mpResponseTopic, value: topic)
+
+proc correlationData*(data: openArray[byte]): MqttProperty =
+  ## Construct an MQTT v5 Correlation Data property.
+  result = MqttProperty(kind: mpCorrelationData, data: @data)
+
+proc correlationData*(data: string): MqttProperty =
+  ## Construct an MQTT v5 Correlation Data property from a string.
+  result = correlationData(bytesFromString(data))
+
 proc hasProperties*(properties: MqttProperties): bool {.inline.} =
   result = properties.len > 0
+
+proc propertyDataString*(property: MqttProperty): string =
+  ## Return binary property data as a Nim string.
+  ##
+  ## This is a convenience helper for textual Correlation Data. Binary users
+  ## should use `property.data` directly.
+  if property.data.len == 0:
+    return ""
+
+  result = newString(property.data.len)
+  copyMem(addr result[0], unsafeAddr property.data[0], property.data.len)
 
 proc payloadString*(message: MqttMessage): string =
   ## Return payload bytes as a Nim string.

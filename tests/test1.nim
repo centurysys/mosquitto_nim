@@ -1007,24 +1007,35 @@ suite "mosquitto_nim nmqtt compatibility facade":
     check ctx.lastError().isNone
 
 suite "mosquitto_nim MQTT v5 property helpers":
-  test "user properties are Nim-owned values":
-    let prop = userProperty("trace-id", "step19")
-    check prop.kind == mpUserProperty
-    check prop.name == "trace-id"
-    check prop.value == "step19"
+  test "MQTT v5 properties are Nim-owned values":
+    let userProp = userProperty("trace-id", "step19")
+    check userProp.kind == mpUserProperty
+    check userProp.name == "trace-id"
+    check userProp.value == "step19"
+
+    let responseProp = responseTopic("mosquitto_nim/reply")
+    check responseProp.kind == mpResponseTopic
+    check responseProp.value == "mosquitto_nim/reply"
+
+    let correlationProp = correlationData("correlation-1")
+    check correlationProp.kind == mpCorrelationData
+    check correlationProp.propertyDataString() == "correlation-1"
 
     let cmd = publishV5Command(
       "mosquitto_nim/step19/property",
       "hello",
       qos = qos1,
-      properties = @[prop]
+      properties = @[userProp, responseProp, correlationProp]
     )
-    check cmd.properties.len == 1
+    check cmd.properties.len == 3
     check cmd.properties[0].name == "trace-id"
+    check cmd.properties[1].value == "mosquitto_nim/reply"
+    check cmd.properties[2].propertyDataString() == "correlation-1"
 
-  test "invalid user property name is rejected by lowlevel property builder":
-    let propsRes = buildMosquittoProperties(@[userProperty("", "bad")])
-    check propsRes.isErr
+  test "invalid MQTT v5 properties are rejected by lowlevel property builder":
+    check buildMosquittoProperties(@[userProperty("", "bad")]).isErr
+    check buildMosquittoProperties(@[responseTopic("")]).isErr
+    check buildMosquittoProperties(@[responseTopic("mosquitto_nim/+")]).isErr
 
 
 when getEnv("MOSQUITTO_NIM_TEST_BROKER") == "1":
@@ -1205,7 +1216,12 @@ when getEnv("MOSQUITTO_NIM_TEST_BROKER") == "1":
       for _ in 0 ..< 10:
         check loopLowLevelClient(client, timeoutMs = 20).isOk
 
-      let props = @[userProperty("trace-id", "step19-lowlevel")]
+      let responseTopicName = "mosquitto_nim/step20/v5/reply/" & unique
+      let props = @[
+        userProperty("trace-id", "step19-lowlevel"),
+        responseTopic(responseTopicName),
+        correlationData("corr-step20-lowlevel")
+      ]
       let pubRes = publishLowLevelClientV5(
         client,
         topic,
@@ -1226,11 +1242,25 @@ when getEnv("MOSQUITTO_NIM_TEST_BROKER") == "1":
       if received.len == 1:
         check received[0].topic == topic
         check received[0].payloadString() == "hello-v5-user-property-lowlevel"
-        check received[0].properties.len == 1
-        if received[0].properties.len == 1:
-          check received[0].properties[0].kind == mpUserProperty
-          check received[0].properties[0].name == "trace-id"
-          check received[0].properties[0].value == "step19-lowlevel"
+        var sawUserProperty = false
+        var sawResponseTopic = false
+        var sawCorrelationData = false
+        for property in received[0].properties:
+          case property.kind
+          of mpUserProperty:
+            if property.name == "trace-id" and property.value == "step19-lowlevel":
+              sawUserProperty = true
+          of mpResponseTopic:
+            if property.value == responseTopicName:
+              sawResponseTopic = true
+          of mpCorrelationData:
+            if property.propertyDataString() == "corr-step20-lowlevel":
+              sawCorrelationData = true
+          else:
+            discard
+        check sawUserProperty
+        check sawResponseTopic
+        check sawCorrelationData
 
       discard disconnectLowLevelClient(client)
       discard closeLowLevelClient(client)
@@ -1263,7 +1293,11 @@ when getEnv("MOSQUITTO_NIM_TEST_BROKER") == "1":
           "hello-v5-user-property-nmqtt-compat",
           1,
           retain = false,
-          properties = @[userProperty("trace-id", "step19-nmqtt")]
+          properties = @[
+            userProperty("trace-id", "step19-nmqtt"),
+            responseTopic("mosquitto_nim/step20/v5/reply/nmqtt"),
+            correlationData("corr-step20-nmqtt")
+          ]
         )
 
         for _ in 0 ..< 400:
