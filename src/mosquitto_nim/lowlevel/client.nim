@@ -1,8 +1,11 @@
 # Destination: src/mosquitto_nim/lowlevel/client.nim
 
+import std/options
+
 import results
 
 import ./bindings/c_api
+import ./bridge
 import ./errors
 import ./types
 
@@ -16,26 +19,8 @@ import ./types
 type
   LowLevelClient* = ref object
     raw: ptr struct_mosquitto
-
-proc newLowLevelClient*(clientId: string; cleanSession = true;
-                        userdata: pointer = nil): MqttResult[LowLevelClient] =
-  ## Create a libmosquitto client handle.
-  ##
-  ## An empty clientId is passed as nil, allowing libmosquitto to generate a
-  ## client id where supported. The raw handle is intentionally kept private.
-  var cClientId: cstring = nil
-  if clientId.len > 0:
-    cClientId = clientId.cstring
-
-  let raw = mosquitto_new(cClientId, cleanSession, userdata)
-  if raw == nil:
-    return err(makeError(
-      meLibraryError,
-      "mosquitto_new",
-      "failed to create libmosquitto client handle"
-    ))
-
-  result = ok(LowLevelClient(raw: raw))
+    messageSink: MessageSink
+    callbackError: Option[MqttError]
 
 proc isClosed*(client: LowLevelClient): bool =
   result = client.isNil or client.raw == nil
@@ -46,6 +31,63 @@ proc requireOpen(client: LowLevelClient; context: string): MqttResult[ptr struct
 
   result = ok(client.raw)
 
+proc rememberCallbackError(client: LowLevelClient; error: MqttError) =
+  if not client.isNil:
+    client.callbackError = some(error)
+
+proc onLowLevelMessage(mosq: ptr struct_mosquitto; userdata: pointer;
+                       message: ptr struct_mosquitto_message;
+                       properties: ptr mosquitto_property) {.cdecl.} =
+  ## libmosquitto message callback trampoline.
+  ##
+  ## This callback must not call application handlers directly. It only copies
+  ## C-owned callback data into a Nim-owned MqttMessage and forwards that object
+  ## to the low-level sink. Higher layers will use the sink to enqueue events.
+  discard mosq
+
+  if userdata == nil:
+    return
+
+  let client = cast[LowLevelClient](userdata)
+  if client.isNil or client.isClosed:
+    return
+
+  let msgRes = copyMessage(message, properties)
+  if msgRes.isErr:
+    client.rememberCallbackError(msgRes.error)
+    return
+
+  if client.messageSink.isNil:
+    return
+
+  try:
+    client.messageSink(msgRes.get())
+  except CatchableError as e:
+    client.rememberCallbackError(invalidState("message callback", e.msg))
+
+proc newLowLevelClient*(clientId: string; cleanSession = true): MqttResult[LowLevelClient] =
+  ## Create a libmosquitto client handle.
+  ##
+  ## An empty clientId is passed as nil, allowing libmosquitto to generate a
+  ## client id where supported. The raw handle is intentionally kept private.
+  var cClientId: cstring = nil
+  if clientId.len > 0:
+    cClientId = clientId.cstring
+
+  let raw = mosquitto_new(cClientId, cleanSession, nil)
+  if raw == nil:
+    return err(makeError(
+      meLibraryError,
+      "mosquitto_new",
+      "failed to create libmosquitto client handle"
+    ))
+
+  let client = LowLevelClient(raw: raw)
+  mosquitto_user_data_set(raw, cast[pointer](client))
+  mosquitto_message_v5_callback_set(raw, onLowLevelMessage)
+
+  result = ok(client)
+
 proc closeLowLevelClient*(client: LowLevelClient): MqttResult[MqttOk] =
   ## Destroy the libmosquitto client handle.
   ##
@@ -54,8 +96,47 @@ proc closeLowLevelClient*(client: LowLevelClient): MqttResult[MqttOk] =
   if client.isNil or client.raw == nil:
     return ok(MqttOk())
 
+  mosquitto_user_data_set(client.raw, nil)
   mosquitto_destroy(client.raw)
   client.raw = nil
+  client.messageSink = nil
+  result = ok(MqttOk())
+
+# ------------------------------------------------------------------------------
+# Low-level callback sink helpers.
+# ------------------------------------------------------------------------------
+proc setMessageSink*(client: LowLevelClient; sink: MessageSink): MqttResult[MqttOk] =
+  ## Install a low-level message sink.
+  ##
+  ## The sink is called from the thread that drives `loopLowLevelClient()`. It is
+  ## intended for worker/event-queue plumbing, not for direct application logic.
+  let rawRes = requireOpen(client, "set message sink")
+  if rawRes.isErr:
+    return err(rawRes.error)
+
+  client.messageSink = sink
+  result = ok(MqttOk())
+
+proc clearMessageSink*(client: LowLevelClient): MqttResult[MqttOk] =
+  let rawRes = requireOpen(client, "clear message sink")
+  if rawRes.isErr:
+    return err(rawRes.error)
+
+  client.messageSink = nil
+  result = ok(MqttOk())
+
+proc lastCallbackError*(client: LowLevelClient): Option[MqttError] =
+  if client.isNil:
+    return none(MqttError)
+
+  result = client.callbackError
+
+proc clearCallbackError*(client: LowLevelClient): MqttResult[MqttOk] =
+  let rawRes = requireOpen(client, "clear callback error")
+  if rawRes.isErr:
+    return err(rawRes.error)
+
+  client.callbackError = none(MqttError)
   result = ok(MqttOk())
 
 # ------------------------------------------------------------------------------

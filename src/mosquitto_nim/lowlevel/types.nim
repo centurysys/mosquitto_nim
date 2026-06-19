@@ -45,6 +45,13 @@ type
     dup*: bool
     properties*: MqttProperties
 
+  MessageSink* = proc(message: MqttMessage)
+    ## Low-level message sink used by the libmosquitto callback trampoline.
+    ##
+    ## The sink is called from whichever thread drives `loopLowLevelClient()`.
+    ## Higher layers must not use this as an application callback boundary;
+    ## worker/async layers should use it only to enqueue copied messages.
+
 # ------------------------------------------------------------------------------
 # Formatting / conversion helpers
 # ------------------------------------------------------------------------------
