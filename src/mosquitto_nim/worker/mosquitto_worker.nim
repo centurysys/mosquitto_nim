@@ -173,7 +173,17 @@ proc handleCommand(command: sink MqttCommand; running: var bool;
       sendWorkerError(eventQueue, invalidState("MQTT worker publish", "client is not connected"), cmd.id)
       return
 
-    let publishRes = publishLowLevelClient(client, cmd.topic, cmd.payload, cmd.qos, cmd.retain)
+    let publishRes = if cmd.properties.len > 0:
+        publishLowLevelClientV5(
+          client,
+          cmd.topic,
+          cmd.payload,
+          cmd.qos,
+          cmd.retain,
+          cmd.properties
+        )
+      else:
+        publishLowLevelClient(client, cmd.topic, cmd.payload, cmd.qos, cmd.retain)
     if publishRes.isErr:
       sendWorkerError(eventQueue, publishRes.error, cmd.id)
       return

@@ -341,6 +341,25 @@ proc publish*(ctx: MqttCtx; topic: string; message: string; qos = 0;
   if mqttQos != qos0:
     inc ctx.pendingCount
 
+proc publishV5*(ctx: MqttCtx; topic: string; message: string; qos = 0;
+                retain = false; properties: MqttProperties = @[]) {.async.} =
+  ## Publish a message with MQTT v5 properties through the compatibility facade.
+  ##
+  ## This is an extension API, not part of the original nmqtt surface.  It keeps
+  ## the same queue-oriented completion rule as publish(): PUBACK is tracked via
+  ## msgQueue()/events but is not awaited here.
+  ctx.requireCtx("publish MQTT v5 message")
+  if not ctx.started or ctx.client.isNil:
+    await ctx.start()
+
+  let mqttQos = ctx.qosFromInt(qos, "publish MQTT v5 message")
+  let publishRes = ctx.client.publishV5(topic, message, mqttQos, retain = retain, properties = properties)
+  if publishRes.isErr:
+    ctx.raiseCompat(publishRes.error)
+
+  if mqttQos != qos0:
+    inc ctx.pendingCount
+
 proc subscribe*(ctx: MqttCtx; topic: string; qos: int;
                 callback: PubCallback): Future[void] {.async.} =
   ctx.requireCtx("subscribe MQTT topic")

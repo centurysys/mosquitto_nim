@@ -1006,6 +1006,26 @@ suite "mosquitto_nim nmqtt compatibility facade":
     ctx.set_will("mosquitto_nim/compat/will", "offline", qos = 1, retain = true)
     check ctx.lastError().isNone
 
+suite "mosquitto_nim MQTT v5 property helpers":
+  test "user properties are Nim-owned values":
+    let prop = userProperty("trace-id", "step19")
+    check prop.kind == mpUserProperty
+    check prop.name == "trace-id"
+    check prop.value == "step19"
+
+    let cmd = publishV5Command(
+      "mosquitto_nim/step19/property",
+      "hello",
+      qos = qos1,
+      properties = @[prop]
+    )
+    check cmd.properties.len == 1
+    check cmd.properties[0].name == "trace-id"
+
+  test "invalid user property name is rejected by lowlevel property builder":
+    let propsRes = buildMosquittoProperties(@[userProperty("", "bad")])
+    check propsRes.isErr
+
 
 when getEnv("MOSQUITTO_NIM_TEST_BROKER") == "1":
   suite "mosquitto_nim nmqtt compatibility broker test":
@@ -1152,3 +1172,118 @@ when getEnv("MOSQUITTO_NIM_TEST_BROKER") == "1":
 
       check waitFor scenario()
 
+
+
+when getEnv("MOSQUITTO_NIM_TEST_BROKER") == "1":
+  suite "mosquitto_nim MQTT v5 user property broker test":
+    test "lowlevel v5 publish can send and receive User Property":
+      let host = getEnv("MOSQUITTO_NIM_TEST_HOST", "127.0.0.1")
+      let port = parseInt(getEnv("MOSQUITTO_NIM_TEST_PORT", "1883"))
+      let unique = $getTime().toUnix() & "_" & $getCurrentProcessId()
+      let topic = "mosquitto_nim/step19/v5/user_property/lowlevel/" & unique
+
+      check initLibrary().isOk
+
+      let clientRes = newLowLevelClient("mosquitto_nim_step19_v5_property_lowlevel")
+      check clientRes.isOk
+      let client = clientRes.get()
+
+      var received: seq[MqttMessage] = @[]
+      let sink: MessageSink = proc(message: MqttMessage) =
+        received.add(message)
+
+      check setProtocolVersion(client, mpv5).isOk
+      check setMessageSink(client, sink).isOk
+      check connectLowLevelClient(client, host, port).isOk
+
+      for _ in 0 ..< 10:
+        check loopLowLevelClient(client, timeoutMs = 20).isOk
+
+      let subRes = subscribeLowLevelClient(client, topic, qos1)
+      check subRes.isOk
+
+      for _ in 0 ..< 10:
+        check loopLowLevelClient(client, timeoutMs = 20).isOk
+
+      let props = @[userProperty("trace-id", "step19-lowlevel")]
+      let pubRes = publishLowLevelClientV5(
+        client,
+        topic,
+        "hello-v5-user-property-lowlevel",
+        qos1,
+        retain = false,
+        properties = props
+      )
+      check pubRes.isOk
+
+      for _ in 0 ..< 100:
+        check loopLowLevelClient(client, timeoutMs = 20).isOk
+        if received.len > 0:
+          break
+
+      check lastCallbackError(client).isNone
+      check received.len == 1
+      if received.len == 1:
+        check received[0].topic == topic
+        check received[0].payloadString() == "hello-v5-user-property-lowlevel"
+        check received[0].properties.len == 1
+        if received[0].properties.len == 1:
+          check received[0].properties[0].kind == mpUserProperty
+          check received[0].properties[0].name == "trace-id"
+          check received[0].properties[0].value == "step19-lowlevel"
+
+      discard disconnectLowLevelClient(client)
+      discard closeLowLevelClient(client)
+      check cleanupLibrary().isOk
+
+    test "nmqtt compatibility extension can publish MQTT v5 User Property":
+      proc scenario(): Future[bool] {.async.} =
+        let host = getEnv("MOSQUITTO_NIM_TEST_HOST", "127.0.0.1")
+        let port = parseInt(getEnv("MOSQUITTO_NIM_TEST_PORT", "1883"))
+        let topic = "mosquitto_nim/step19/v5/user_property/nmqtt_compat/" & $getTime().toUnix() & "_" & $getCurrentProcessId()
+
+        let ctx = newMqttCtx("mosquitto_nim_step19_v5_property_nmqtt")
+        ctx.set_host(host, port)
+        ctx.setProtocolVersion(mpv5)
+
+        var receivedTopic = ""
+        var receivedPayload = ""
+        proc onData(topic: string; message: string) =
+          receivedTopic = topic
+          receivedPayload = message
+
+        await ctx.start()
+        check ctx.isConnected()
+
+        await ctx.subscribe(topic, 1, onData)
+        await sleepAsync(100)
+
+        await ctx.publishV5(
+          topic,
+          "hello-v5-user-property-nmqtt-compat",
+          1,
+          retain = false,
+          properties = @[userProperty("trace-id", "step19-nmqtt")]
+        )
+
+        for _ in 0 ..< 400:
+          if receivedPayload == "hello-v5-user-property-nmqtt-compat":
+            break
+          await sleepAsync(10)
+
+        check receivedTopic == topic
+        check receivedPayload == "hello-v5-user-property-nmqtt-compat"
+
+        for _ in 0 ..< 400:
+          if ctx.msgQueue() == 0:
+            break
+          await sleepAsync(10)
+        check ctx.msgQueue() == 0
+
+        await ctx.unsubscribe(topic)
+        await sleepAsync(50)
+        await ctx.disconnect()
+        check not ctx.isConnected()
+        return receivedTopic == topic and receivedPayload == "hello-v5-user-property-nmqtt-compat"
+
+      check waitFor scenario()

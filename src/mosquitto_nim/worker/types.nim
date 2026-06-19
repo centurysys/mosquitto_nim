@@ -52,6 +52,7 @@ type
     payload*: seq[byte]
     qos*: MqttQos
     retain*: bool
+    properties*: MqttProperties
 
   MqttEvent* = object
     ## Event emitted by the MQTT worker.
@@ -112,19 +113,36 @@ proc stopCommand*(id = 0): MqttCommand =
   result = MqttCommand(id: id, kind: mckStop, qos: qos0)
 
 proc publishCommand*(topic: string; payload: openArray[byte]; qos = qos0;
-                     retain = false; id = 0): MqttCommand =
+                     retain = false; id = 0;
+                     properties: MqttProperties = @[]): MqttCommand =
   result = MqttCommand(
     id: id,
     kind: mckPublish,
     topic: topic,
     payload: @payload,
     qos: qos,
-    retain: retain
+    retain: retain,
+    properties: properties
   )
 
 proc publishCommand*(topic: string; payload: string; qos = qos0;
-                     retain = false; id = 0): MqttCommand =
-  result = publishCommand(topic, bytesFromString(payload), qos, retain, id)
+                     retain = false; id = 0;
+                     properties: MqttProperties = @[]): MqttCommand =
+  result = publishCommand(topic, bytesFromString(payload), qos, retain, id, properties)
+
+proc publishV5Command*(topic: string; payload: openArray[byte]; qos = qos0;
+                       retain = false; id = 0;
+                       properties: MqttProperties = @[]): MqttCommand =
+  ## Construct a PUBLISH command carrying MQTT v5 properties.
+  ##
+  ## The worker still decides whether to call mosquitto_publish() or
+  ## mosquitto_publish_v5() based on whether properties are present.
+  result = publishCommand(topic, payload, qos = qos, retain = retain, id = id, properties = properties)
+
+proc publishV5Command*(topic: string; payload: string; qos = qos0;
+                       retain = false; id = 0;
+                       properties: MqttProperties = @[]): MqttCommand =
+  result = publishV5Command(topic, bytesFromString(payload), qos = qos, retain = retain, id = id, properties = properties)
 
 proc subscribeCommand*(topicFilter: string; qos = qos0; id = 0): MqttCommand =
   result = MqttCommand(
@@ -212,7 +230,8 @@ proc summary*(command: MqttCommand): string =
     let will = if command.will.enabled: ", will=true" else: ""
     result = &"{command.kind}(id={command.id}, host={command.host}, port={command.port}, protocol={command.protocolVersion}{auth}{tls}{will})"
   of mckPublish:
-    result = &"{command.kind}(id={command.id}, topic={command.topic}, payloadLen={command.payload.len}, qos={command.qos}, retain={command.retain})"
+    let props = if command.properties.len > 0: &", properties={command.properties.len}" else: ""
+    result = &"{command.kind}(id={command.id}, topic={command.topic}, payloadLen={command.payload.len}, qos={command.qos}, retain={command.retain}{props})"
   of mckSubscribe, mckUnsubscribe:
     result = &"{command.kind}(id={command.id}, topic={command.topic}, qos={command.qos})"
   of mckDisconnect, mckStop:

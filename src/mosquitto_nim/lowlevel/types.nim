@@ -49,9 +49,17 @@ type
 
   MqttPropertyKind* = enum
     mpUnknown
+    mpUserProperty
 
   MqttProperty* = object
+    ## Nim-owned MQTT v5 property.
+    ##
+    ## This first property model intentionally starts small.  User Property is
+    ## the most useful generic extension point and can be sent with PUBLISH
+    ## without changing nmqtt-compatible publish semantics.
     kind*: MqttPropertyKind
+    name*: string
+    value*: string
 
   MqttProperties* = seq[MqttProperty]
 
@@ -172,6 +180,17 @@ proc mqttWill*(topic: string; payload: openArray[byte]; qos = qos0;
 proc mqttWill*(topic: string; payload: string; qos = qos0;
                retain = false): MqttWill =
   result = mqttWill(topic, bytesFromString(payload), qos = qos, retain = retain)
+
+proc userProperty*(name, value: string): MqttProperty =
+  ## Construct an MQTT v5 User Property.
+  ##
+  ## User Property is represented as a UTF-8 string pair in MQTT v5.  Empty names
+  ## are rejected when the property is converted to libmosquitto properties; this
+  ## constructor remains allocation-only and does not raise.
+  result = MqttProperty(kind: mpUserProperty, name: name, value: value)
+
+proc hasProperties*(properties: MqttProperties): bool {.inline.} =
+  result = properties.len > 0
 
 proc payloadString*(message: MqttMessage): string =
   ## Return payload bytes as a Nim string.

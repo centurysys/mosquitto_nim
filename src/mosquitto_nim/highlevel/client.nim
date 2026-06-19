@@ -269,6 +269,21 @@ proc publish*(client: MqttClient; topic: string; payload: string;
   var cmd = publishCommand(topic, payload, qos = qos, retain = retain)
   result = client.sendClientCommand(move cmd, "publish MQTT message")
 
+proc publishV5*(client: MqttClient; topic: string; payload: openArray[byte];
+                qos = qos0; retain = false;
+                properties: MqttProperties = @[]): MqttResult[int] =
+  ## Queue a PUBLISH command with MQTT v5 properties.
+  ##
+  ## This is still queue-oriented. It does not wait for PublishCompleted/PUBACK.
+  var cmd = publishV5Command(topic, payload, qos = qos, retain = retain, properties = properties)
+  result = client.sendClientCommand(move cmd, "publish MQTT v5 message")
+
+proc publishV5*(client: MqttClient; topic: string; payload: string;
+                qos = qos0; retain = false;
+                properties: MqttProperties = @[]): MqttResult[int] =
+  var cmd = publishV5Command(topic, payload, qos = qos, retain = retain, properties = properties)
+  result = client.sendClientCommand(move cmd, "publish MQTT v5 message")
+
 proc subscribe*(client: MqttClient; topicFilter: string; qos = qos0): MqttResult[int] =
   var cmd = subscribeCommand(topicFilter, qos = qos)
   result = client.sendClientCommand(move cmd, "subscribe MQTT topic")

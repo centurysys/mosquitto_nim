@@ -526,6 +526,62 @@ proc publishLowLevelClient*(client: LowLevelClient; topic: string;
 
   result = publishLowLevelClient(client, topic, bytes, qos, retain)
 
+proc publishLowLevelClientV5*(client: LowLevelClient; topic: string;
+                              payload: openArray[byte]; qos = qos0;
+                              retain = false;
+                              properties: MqttProperties = @[]): MqttResult[int] =
+  ## Queue an MQTT v5 PUBLISH packet with optional properties.
+  ##
+  ## This is separate from publishLowLevelClient() so existing MQTT 3.1.1-style
+  ## callers keep using mosquitto_publish().  Callers that select MQTT v5 can use
+  ## this when they need User Properties or other v5 metadata.
+  let rawRes = requireOpen(client, "mosquitto_publish_v5")
+  if rawRes.isErr:
+    return err(rawRes.error)
+
+  let topicRes = validatePublishTopic(topic)
+  if topicRes.isErr:
+    return err(topicRes.error)
+
+  let propsRes = buildMosquittoProperties(properties, "publish MQTT v5 properties")
+  if propsRes.isErr:
+    return err(propsRes.error)
+
+  var rawProps = propsRes.get()
+  var mid: cint
+  var payloadPtr: pointer = nil
+  if payload.len > 0:
+    payloadPtr = cast[pointer](unsafeAddr payload[0])
+
+  let rc = mosquitto_publish_v5(
+    rawRes.get(),
+    addr mid,
+    topic.cstring,
+    payload.len.cint,
+    payloadPtr,
+    qos.toInt().cint,
+    retain,
+    rawProps
+  )
+  freeMosquittoProperties(rawProps)
+
+  let rcRes = checkMosq(rc, "mosquitto_publish_v5")
+  if rcRes.isErr:
+    return err(rcRes.error)
+
+  result = ok(mid.int)
+
+proc publishLowLevelClientV5*(client: LowLevelClient; topic: string;
+                              payload: string; qos = qos0;
+                              retain = false;
+                              properties: MqttProperties = @[]): MqttResult[int] =
+  ## Queue a text MQTT v5 PUBLISH packet with optional properties.
+  var bytes = newSeq[byte](payload.len)
+  for i, ch in payload:
+    bytes[i] = byte(ord(ch))
+
+  result = publishLowLevelClientV5(client, topic, bytes, qos, retain, properties)
+
 proc subscribeLowLevelClient*(client: LowLevelClient; topicFilter: string;
                               qos = qos0): MqttResult[int] =
   ## Queue a SUBSCRIBE packet and return the libmosquitto message id.
