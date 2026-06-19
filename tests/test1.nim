@@ -421,6 +421,70 @@ suite "mosquitto_nim highlevel dispatcher":
 
     check waitFor scenario()
 
+
+
+suite "mosquitto_nim highlevel client dispatcher integration":
+  test "client-owned dispatcher invokes registered handlers":
+    proc scenario(): Future[bool] {.async.} =
+      let clientRes = startMqttClient("mosquitto_nim_step12_dispatcher", pollMs = 1)
+      check clientRes.isOk
+      if clientRes.isErr:
+        return false
+
+      let client = clientRes.get()
+      var received: seq[string] = @[]
+
+      let handler: MqttMessageHandler = proc(message: MqttMessage) =
+        received.add(message.topic & "=" & message.payloadString())
+
+      let handlerRes = client.addMessageHandler("mosquitto_nim/client/+", handler)
+      check handlerRes.isOk
+      check client.messageHandlerCount() == 1
+      if handlerRes.isErr:
+        discard client.requestStop()
+        discard client.joinMqttClient()
+        return false
+
+      let missMsg = MqttMessage(
+        topic: "mosquitto_nim/client/other/value",
+        payload: bytesFromString("miss"),
+        qos: qos0
+      )
+      let missDispatch = await client.dispatchEvent(messageReceivedEvent(missMsg))
+      check missDispatch.isOk
+      if missDispatch.isOk:
+        check missDispatch.get() == 0
+      check received.len == 0
+
+      let hitMsg = MqttMessage(
+        topic: "mosquitto_nim/client/value",
+        payload: bytesFromString("hit"),
+        qos: qos1
+      )
+      let hitDispatch = await client.dispatchEvent(messageReceivedEvent(hitMsg))
+      check hitDispatch.isOk
+      if hitDispatch.isOk:
+        check hitDispatch.get() == 1
+      check received == @[
+        "mosquitto_nim/client/value=hit"
+      ]
+
+      let removeRes = client.removeMessageHandler(handlerRes.get())
+      check removeRes.isOk
+      if removeRes.isOk:
+        check removeRes.get()
+      check client.messageHandlerCount() == 0
+
+      let stopRes = client.requestStop()
+      check stopRes.isOk
+      if stopRes.isOk:
+        discard await client.nextEvent()
+
+      check client.joinMqttClient().isOk
+      return received == @["mosquitto_nim/client/value=hit"]
+
+    check waitFor scenario()
+
 when getEnv("MOSQUITTO_NIM_TEST_BROKER") == "1":
   suite "mosquitto_nim lowlevel broker smoke test":
     test "manual loop can connect, subscribe, publish, and disconnect":
@@ -730,3 +794,109 @@ when getEnv("MOSQUITTO_NIM_TEST_BROKER") == "1":
 
       check waitFor scenario()
 
+
+
+when getEnv("MOSQUITTO_NIM_TEST_BROKER") == "1":
+  suite "mosquitto_nim highlevel subscribe handler broker test":
+    test "subscribe with handler registers callback and broker subscription":
+      proc waitForEvent(client: MqttClient; maxRounds: int;
+                        wantedKind: MqttEventKind; commandId = -1): Future[Option[MqttEvent]] {.async.} =
+        for _ in 0 ..< maxRounds:
+          let drainRes = client.drainEvents()
+          check drainRes.isOk
+          if drainRes.isOk:
+            for event in drainRes.get():
+              if event.kind == wantedKind:
+                if commandId >= 0 and event.commandId != commandId:
+                  continue
+                return some(event)
+          await sleepAsync(10)
+
+        return none(MqttEvent)
+
+      proc scenario(): Future[bool] {.async.} =
+        let host = getEnv("MOSQUITTO_NIM_TEST_HOST", "127.0.0.1")
+        let port = parseInt(getEnv("MOSQUITTO_NIM_TEST_PORT", "1883"))
+        let topic = "mosquitto_nim/step12/handler/" & $getTime().toUnix() & "_" & $getCurrentProcessId()
+
+        let clientRes = startMqttClient("mosquitto_nim_step12_handler", loopTimeoutMs = 10, pollMs = 1)
+        check clientRes.isOk
+        if clientRes.isErr:
+          return false
+
+        let client = clientRes.get()
+        var handlerPayload = ""
+        var handlerTopic = ""
+
+        let connectIdRes = client.connect(host, port = port, keepalive = 30)
+        check connectIdRes.isOk
+        if connectIdRes.isErr:
+          discard client.requestStop()
+          discard client.joinMqttClient()
+          return false
+        let connectEvent = await waitForEvent(client, 300, mevConnected, connectIdRes.get())
+        check connectEvent.isSome
+
+        let handler: MqttMessageHandler = proc(message: MqttMessage) =
+          handlerTopic = message.topic
+          handlerPayload = message.payloadString()
+
+        let subRes = client.subscribe(topic, qos1, handler)
+        check subRes.isOk
+        if subRes.isErr:
+          discard client.requestStop()
+          discard client.joinMqttClient()
+          return false
+        check subRes.get().handlerId > 0
+        check subRes.get().commandId > 0
+        check client.messageHandlerCount() == 1
+
+        let subscribeEvent = await waitForEvent(client, 300, mevSubscribed, subRes.get().commandId)
+        check subscribeEvent.isSome
+
+        let publishIdRes = client.publish(topic, "hello-handler", qos1, retain = false)
+        check publishIdRes.isOk
+        if publishIdRes.isErr:
+          discard client.requestStop()
+          discard client.joinMqttClient()
+          return false
+
+        var sawMessage = false
+        for _ in 0 ..< 400:
+          let drainRes = client.drainEvents()
+          check drainRes.isOk
+          if drainRes.isOk:
+            for event in drainRes.get():
+              if event.kind == mevMessageReceived and event.message.topic == topic:
+                sawMessage = true
+              let dispatchRes = await client.dispatchEvent(event)
+              check dispatchRes.isOk
+          if sawMessage and handlerPayload == "hello-handler":
+            break
+          await sleepAsync(10)
+
+        check sawMessage
+        check handlerTopic == topic
+        check handlerPayload == "hello-handler"
+
+        let unsubRes = client.unsubscribe(subRes.get())
+        check unsubRes.isOk
+        if unsubRes.isOk:
+          let unsubEvent = await waitForEvent(client, 300, mevUnsubscribed, unsubRes.get())
+          check unsubEvent.isSome
+        check client.messageHandlerCount() == 0
+
+        let disconnectIdRes = client.disconnect()
+        check disconnectIdRes.isOk
+        if disconnectIdRes.isOk:
+          discard await waitForEvent(client, 200, mevDisconnected, disconnectIdRes.get())
+
+        let stopIdRes = client.requestStop()
+        check stopIdRes.isOk
+        if stopIdRes.isOk:
+          discard await waitForEvent(client, 200, mevStopped, stopIdRes.get())
+
+        check client.joinMqttClient().isOk
+        return sawMessage and handlerTopic == topic and handlerPayload == "hello-handler"
+
+      check waitFor scenario()

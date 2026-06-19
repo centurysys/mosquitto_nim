@@ -8,8 +8,6 @@ import ../lowlevel/client as lowlevel_client
 import ../lowlevel/errors
 import ../lowlevel/types
 import ../worker/types
-import ./client as highlevel_client
-
 # ------------------------------------------------------------------------------
 # High-level message dispatcher.
 #
@@ -206,25 +204,3 @@ proc dispatchEvent*(dispatcher: MqttDispatcher;
     return ok(0)
 
   return await dispatcher.dispatchMessage(event.message)
-
-proc dispatchDrainedEvents*(dispatcher: MqttDispatcher;
-                            client: MqttClient): Future[MqttResult[int]] {.async.} =
-  ## Drain currently queued client events and dispatch all received messages.
-  ##
-  ## This is a convenience helper for applications/tests that poll the highlevel
-  ## client.  It does not wait for new events.
-  if client.isNil:
-    return err(invalidState("dispatch drained MQTT events", "client is nil"))
-
-  let drainRes = client.drainEvents()
-  if drainRes.isErr:
-    return err(drainRes.error)
-
-  var count = 0
-  for event in drainRes.get():
-    let dispatchRes = await dispatcher.dispatchEvent(event)
-    if dispatchRes.isErr:
-      return err(dispatchRes.error)
-    count += dispatchRes.get()
-
-  result = ok(count)

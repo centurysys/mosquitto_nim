@@ -9,6 +9,7 @@ import ../lowlevel/types
 import ../worker/types
 import ../worker/mosquitto_worker
 import ./async_bridge
+import ./dispatcher
 
 # ------------------------------------------------------------------------------
 # High-level asyncdispatch MQTT client.
@@ -24,9 +25,21 @@ import ./async_bridge
 # tracking.
 # ------------------------------------------------------------------------------
 type
+  MqttSubscription* = object
+    ## Handler + broker subscription pair returned by subscribe(..., handler).
+    ##
+    ## commandId is the worker command id for the broker SUBSCRIBE command.
+    ## handlerId is the highlevel dispatcher handler id.  They are intentionally
+    ## separate because broker subscription acknowledgement and application
+    ## callback registration have different lifetimes.
+    commandId*: int
+    handlerId*: int
+    topicFilter*: string
+
   MqttClient* = ref object
     worker: MqttWorker
     bridge: MqttAsyncBridge
+    dispatcher: MqttDispatcher
     nextCommandId: int
     closed: bool
 
@@ -105,6 +118,7 @@ proc startMqttClient*(clientId = ""; cleanSession = true;
   new client
   client.worker = worker
   client.bridge = bridgeRes.get()
+  client.dispatcher = newMqttDispatcher()
   client.nextCommandId = 0
   client.closed = false
   result = ok(client)
@@ -144,6 +158,66 @@ proc mqttWorker*(client: MqttClient): MqttWorker =
   if client.isNil:
     return nil
   result = client.worker
+
+proc mqttDispatcher*(client: MqttClient): MqttDispatcher =
+  ## Return the owned dispatcher for tests/diagnostics.
+  ##
+  ## Application code should normally use addMessageHandler(), subscribe(...,
+  ## handler), and dispatchEvent() wrappers instead of reaching into the
+  ## dispatcher directly.
+  if client.isNil:
+    return nil
+  result = client.dispatcher
+
+proc messageHandlerCount*(client: MqttClient): int =
+  if client.isNil or client.dispatcher.isNil:
+    return 0
+  result = client.dispatcher.handlerCount()
+
+# ------------------------------------------------------------------------------
+# Dispatcher registration API
+# ------------------------------------------------------------------------------
+proc addMessageHandler*(client: MqttClient; topicFilter: string;
+                        handler: MqttMessageHandler): MqttResult[int] =
+  if client.isNil:
+    return err(invalidState("add MQTT client message handler", "client is nil"))
+  if client.closed:
+    return err(invalidState("add MQTT client message handler", "client is closed"))
+  if client.dispatcher.isNil:
+    return err(invalidState("add MQTT client message handler", "dispatcher is nil"))
+
+  result = client.dispatcher.addMessageHandler(topicFilter, handler)
+
+proc addMessageHandler*(client: MqttClient; topicFilter: string;
+                        handler: MqttAsyncMessageHandler): MqttResult[int] =
+  if client.isNil:
+    return err(invalidState("add MQTT client async message handler", "client is nil"))
+  if client.closed:
+    return err(invalidState("add MQTT client async message handler", "client is closed"))
+  if client.dispatcher.isNil:
+    return err(invalidState("add MQTT client async message handler", "dispatcher is nil"))
+
+  result = client.dispatcher.addMessageHandler(topicFilter, handler)
+
+proc removeMessageHandler*(client: MqttClient; handlerId: int): MqttResult[bool] =
+  if client.isNil:
+    return err(invalidState("remove MQTT client message handler", "client is nil"))
+  if client.closed:
+    return err(invalidState("remove MQTT client message handler", "client is closed"))
+  if client.dispatcher.isNil:
+    return err(invalidState("remove MQTT client message handler", "dispatcher is nil"))
+
+  result = client.dispatcher.removeMessageHandler(handlerId)
+
+proc clearMessageHandlers*(client: MqttClient): MqttResult[MqttOk] =
+  if client.isNil:
+    return err(invalidState("clear MQTT client message handlers", "client is nil"))
+  if client.closed:
+    return err(invalidState("clear MQTT client message handlers", "client is closed"))
+  if client.dispatcher.isNil:
+    return err(invalidState("clear MQTT client message handlers", "dispatcher is nil"))
+
+  result = client.dispatcher.clearMessageHandlers()
 
 # ------------------------------------------------------------------------------
 # Command API
@@ -187,9 +261,65 @@ proc subscribe*(client: MqttClient; topicFilter: string; qos = qos0): MqttResult
   var cmd = subscribeCommand(topicFilter, qos = qos)
   result = client.sendClientCommand(move cmd, "subscribe MQTT topic")
 
+proc subscribe*(client: MqttClient; topicFilter: string; qos: MqttQos;
+                handler: MqttMessageHandler): MqttResult[MqttSubscription] =
+  ## Register a sync handler and queue a broker SUBSCRIBE command.
+  ##
+  ## Success means the handler is registered locally and the SUBSCRIBE command
+  ## was accepted by the worker queue.  It does not wait for SUBACK.  Watch the
+  ## mevSubscribed event with subscription.commandId when broker acknowledgement
+  ## matters.
+  let handlerRes = client.addMessageHandler(topicFilter, handler)
+  if handlerRes.isErr:
+    return err(handlerRes.error)
+
+  let commandRes = client.subscribe(topicFilter, qos = qos)
+  if commandRes.isErr:
+    discard client.removeMessageHandler(handlerRes.get())
+    return err(commandRes.error)
+
+  result = ok(MqttSubscription(
+    commandId: commandRes.get(),
+    handlerId: handlerRes.get(),
+    topicFilter: topicFilter
+  ))
+
+proc subscribe*(client: MqttClient; topicFilter: string; qos: MqttQos;
+                handler: MqttAsyncMessageHandler): MqttResult[MqttSubscription] =
+  ## Register an async handler and queue a broker SUBSCRIBE command.
+  ##
+  ## Async handlers are awaited serially by dispatchEvent()/dispatchDrainedEvents().
+  let handlerRes = client.addMessageHandler(topicFilter, handler)
+  if handlerRes.isErr:
+    return err(handlerRes.error)
+
+  let commandRes = client.subscribe(topicFilter, qos = qos)
+  if commandRes.isErr:
+    discard client.removeMessageHandler(handlerRes.get())
+    return err(commandRes.error)
+
+  result = ok(MqttSubscription(
+    commandId: commandRes.get(),
+    handlerId: handlerRes.get(),
+    topicFilter: topicFilter
+  ))
+
 proc unsubscribe*(client: MqttClient; topicFilter: string): MqttResult[int] =
   var cmd = unsubscribeCommand(topicFilter)
   result = client.sendClientCommand(move cmd, "unsubscribe MQTT topic")
+
+proc unsubscribe*(client: MqttClient; subscription: MqttSubscription): MqttResult[int] =
+  ## Remove the registered handler and queue a broker UNSUBSCRIBE command.
+  ##
+  ## The local handler is removed before UNSUBSCRIBE is queued, so no further
+  ## callbacks are dispatched for this subscription even if the broker still has
+  ## in-flight messages before UNSUBACK.
+  if subscription.handlerId > 0:
+    let removeRes = client.removeMessageHandler(subscription.handlerId)
+    if removeRes.isErr:
+      return err(removeRes.error)
+
+  result = client.unsubscribe(subscription.topicFilter)
 
 # ------------------------------------------------------------------------------
 # Event API
@@ -215,3 +345,53 @@ proc drainEvents*(client: MqttClient): MqttResult[seq[MqttEvent]] =
     return err(invalidState("MQTT client drainEvents", "async bridge is nil"))
 
   result = client.bridge.drainEvents()
+
+# ------------------------------------------------------------------------------
+# Dispatch API
+# ------------------------------------------------------------------------------
+proc dispatchEvent*(client: MqttClient; event: MqttEvent): Future[MqttResult[int]] {.async.} =
+  ## Dispatch one worker event through the client's message dispatcher.
+  ##
+  ## Only mevMessageReceived invokes handlers. Control events remain visible to
+  ## callers through nextEvent()/drainEvents() and return a dispatch count of 0.
+  if client.isNil:
+    return err(invalidState("dispatch MQTT client event", "client is nil"))
+  if client.closed:
+    return err(invalidState("dispatch MQTT client event", "client is closed"))
+  if client.dispatcher.isNil:
+    return err(invalidState("dispatch MQTT client event", "dispatcher is nil"))
+
+  return await client.dispatcher.dispatchEvent(event)
+
+proc dispatchDrainedEvents*(client: MqttClient): Future[MqttResult[int]] {.async.} =
+  ## Drain currently queued events and dispatch all message events.
+  ##
+  ## This is convenient for nmqtt-style callback loops. It deliberately does not
+  ## make publish wait for PUBACK; PublishAccepted/PublishCompleted still remain
+  ## ordinary control events visible to callers using drainEvents()/nextEvent().
+  if client.isNil:
+    return err(invalidState("dispatch drained MQTT client events", "client is nil"))
+
+  let drainRes = client.drainEvents()
+  if drainRes.isErr:
+    return err(drainRes.error)
+
+  var count = 0
+  for event in drainRes.get():
+    let dispatchRes = await client.dispatchEvent(event)
+    if dispatchRes.isErr:
+      return err(dispatchRes.error)
+    count += dispatchRes.get()
+
+  result = ok(count)
+
+proc dispatchNextEvent*(client: MqttClient): Future[MqttResult[int]] {.async.} =
+  ## Await one event and dispatch it if it is a message event.
+  if client.isNil:
+    return err(invalidState("dispatch next MQTT client event", "client is nil"))
+
+  let eventRes = await client.nextEvent()
+  if eventRes.isErr:
+    return err(eventRes.error)
+
+  return await client.dispatchEvent(eventRes.get())
