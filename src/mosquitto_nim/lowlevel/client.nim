@@ -265,6 +265,37 @@ proc clearCallbackError*(client: LowLevelClient): MqttResult[MqttOk] =
   client.callbackError = none(MqttError)
   result = ok(MqttOk())
 
+
+proc setUsernamePassword*(client: LowLevelClient; username: string;
+                          password = ""): MqttResult[MqttOk] =
+  ## Configure username/password authentication on the libmosquitto handle.
+  ##
+  ## This must be called before connectLowLevelClient().  Passing an empty
+  ## username and empty password clears the configured credentials.  A password
+  ## without a username is rejected because libmosquitto requires the username
+  ## field to carry password authentication.
+  let rawRes = requireOpen(client, "set MQTT username/password")
+  if rawRes.isErr:
+    return err(rawRes.error)
+
+  if username.len == 0 and password.len > 0:
+    return err(invalidArgument(
+      "set MQTT username/password",
+      "password cannot be set without username"
+    ))
+
+  var userC: cstring = nil
+  var passC: cstring = nil
+  if username.len > 0:
+    userC = username.cstring
+  if password.len > 0:
+    passC = password.cstring
+
+  result = checkMosq(
+    mosquitto_username_pw_set(rawRes.get(), userC, passC),
+    "mosquitto_username_pw_set"
+  )
+
 # ------------------------------------------------------------------------------
 # Topic validation helpers.
 # ------------------------------------------------------------------------------

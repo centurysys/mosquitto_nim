@@ -85,8 +85,6 @@ proc ensureSupportedConfig(ctx: MqttCtx) =
   ## Lowlevel support can be wired later without changing the compatibility API.
   if ctx.sslOn:
     ctx.raiseCompat(invalidState("start nmqtt-compatible client", "SSL/TLS is not wired yet"))
-  if ctx.username.len > 0 or ctx.password.len > 0:
-    ctx.raiseCompat(invalidState("start nmqtt-compatible client", "username/password auth is not wired yet"))
   if ctx.sslCert.len > 0 or ctx.sslKey.len > 0:
     ctx.raiseCompat(invalidState("start nmqtt-compatible client", "client certificate auth is not wired yet"))
   if ctx.willTopic.len > 0:
@@ -240,7 +238,13 @@ proc connect*(ctx: MqttCtx) {.async.} =
     return
 
   ctx.ensureClient()
-  let connectRes = ctx.client.connect(ctx.host, port = ctx.port, keepalive = ctx.keepalive)
+  let connectRes = ctx.client.connect(
+    ctx.host,
+    port = ctx.port,
+    keepalive = ctx.keepalive,
+    username = ctx.username,
+    password = ctx.password
+  )
   if connectRes.isErr:
     ctx.raiseCompat(connectRes.error)
 

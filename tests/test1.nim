@@ -98,10 +98,37 @@ suite "mosquitto_nim lowlevel smoke test":
 
     check cleanupLibrary().isOk
 
+  test "username/password auth can be configured and cleared":
+    check initLibrary().isOk
+
+    let clientRes = newLowLevelClient("mosquitto_nim_step14_auth")
+    check clientRes.isOk
+    let client = clientRes.get()
+
+    check setUsernamePassword(client, "user1", "pass1").isOk
+    check setUsernamePassword(client, "user1", "").isOk
+    check setUsernamePassword(client, "", "").isOk
+    check setUsernamePassword(client, "", "pass-without-user").isErr
+
+    check closeLowLevelClient(client).isOk
+    check cleanupLibrary().isOk
 
 
 suite "mosquitto_nim worker value types":
   test "worker command constructors keep Nim-owned payload bytes":
+    let connectCmd = connectCommand(
+      "127.0.0.1",
+      port = 1883,
+      keepalive = 30,
+      username = "worker-user",
+      password = "worker-pass",
+      id = 6
+    )
+    check connectCmd.kind == mckConnect
+    check connectCmd.username == "worker-user"
+    check connectCmd.password == "worker-pass"
+    check connectCmd.summary().contains("auth=true")
+
     let cmd = publishCommand("mosquitto_nim/worker/test", "hello-worker", qos1, retain = true, id = 7)
 
     check cmd.kind == mckPublish
@@ -909,6 +936,7 @@ suite "mosquitto_nim nmqtt compatibility facade":
     check ctx.msgQueue() == 0
     ctx.set_host("127.0.0.1", 1883)
     ctx.set_ping_interval(30)
+    ctx.set_auth("compat-user", "compat-pass")
     check ctx.lastError().isNone
 
 

@@ -43,6 +43,8 @@ type
     host*: string
     port*: int
     keepalive*: int
+    username*: string
+    password*: string
     topic*: string
     payload*: seq[byte]
     qos*: MqttQos
@@ -89,13 +91,15 @@ proc payloadString*(command: MqttCommand): string =
 # Command constructors
 # ------------------------------------------------------------------------------
 proc connectCommand*(host: string; port = 1883; keepalive = 60;
-                     id = 0): MqttCommand =
+                     username = ""; password = ""; id = 0): MqttCommand =
   result = MqttCommand(
     id: id,
     kind: mckConnect,
     host: host,
     port: port,
     keepalive: keepalive,
+    username: username,
+    password: password,
     qos: qos0
   )
 
@@ -201,7 +205,8 @@ proc stoppedEvent*(commandId = 0): MqttEvent =
 proc summary*(command: MqttCommand): string =
   case command.kind
   of mckConnect:
-    result = &"{command.kind}(id={command.id}, host={command.host}, port={command.port})"
+    let auth = if command.username.len > 0: ", auth=true" else: ""
+    result = &"{command.kind}(id={command.id}, host={command.host}, port={command.port}{auth})"
   of mckPublish:
     result = &"{command.kind}(id={command.id}, topic={command.topic}, payloadLen={command.payload.len}, qos={command.qos}, retain={command.retain})"
   of mckSubscribe, mckUnsubscribe:
