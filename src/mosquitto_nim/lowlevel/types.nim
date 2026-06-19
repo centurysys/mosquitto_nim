@@ -23,6 +23,17 @@ type
 
   MqttRetain* = bool
 
+  MqttWill* = object
+    ## Nim-owned MQTT Will configuration.
+    ##
+    ## The Will payload is stored in Nim-owned bytes until a lower layer applies
+    ## it to libmosquitto before connecting.
+    enabled*: bool
+    topic*: string
+    payload*: seq[byte]
+    qos*: MqttQos
+    retain*: bool
+
   MqttPropertyKind* = enum
     mpUnknown
 
@@ -101,6 +112,32 @@ proc toMqttQos*(value: int; context = "MQTT QoS"): MqttResult[MqttQos] =
     result = ok(qos2)
   else:
     result = err(invalidArgument(context, &"QoS must be 0, 1, or 2: {value}"))
+
+
+proc bytesFromString*(payload: string): seq[byte] =
+  ## Convert a Nim string to MQTT payload bytes.
+  if payload.len == 0:
+    return @[]
+
+  result = newSeq[byte](payload.len)
+  copyMem(addr result[0], unsafeAddr payload[0], payload.len)
+
+proc noWill*(): MqttWill =
+  result = MqttWill(enabled: false, qos: qos0)
+
+proc mqttWill*(topic: string; payload: openArray[byte]; qos = qos0;
+               retain = false): MqttWill =
+  result = MqttWill(
+    enabled: true,
+    topic: topic,
+    payload: @payload,
+    qos: qos,
+    retain: retain
+  )
+
+proc mqttWill*(topic: string; payload: string; qos = qos0;
+               retain = false): MqttWill =
+  result = mqttWill(topic, bytesFromString(payload), qos = qos, retain = retain)
 
 proc payloadString*(message: MqttMessage): string =
   ## Return payload bytes as a Nim string.

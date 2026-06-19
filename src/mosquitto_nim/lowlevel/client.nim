@@ -308,6 +308,54 @@ proc validatePublishTopic*(topic: string): MqttResult[MqttOk] =
 
   result = checkMosq(mosquitto_pub_topic_check(topic.cstring), "mosquitto_pub_topic_check")
 
+
+proc setWill*(client: LowLevelClient; topic: string; payload: openArray[byte];
+              qos = qos0; retain = false): MqttResult[MqttOk] =
+  ## Configure the MQTT Will message on the libmosquitto handle.
+  ##
+  ## This must be called before connectLowLevelClient().  Payload bytes are
+  ## copied by libmosquitto, so the openArray does not escape this call.
+  let rawRes = requireOpen(client, "set MQTT will")
+  if rawRes.isErr:
+    return err(rawRes.error)
+
+  let topicRes = validatePublishTopic(topic)
+  if topicRes.isErr:
+    return err(topicRes.error)
+
+  var payloadPtr: pointer = nil
+  if payload.len > 0:
+    payloadPtr = cast[pointer](unsafeAddr payload[0])
+
+  result = checkMosq(
+    mosquitto_will_set(
+      rawRes.get(),
+      topic.cstring,
+      payload.len.cint,
+      payloadPtr,
+      qos.toInt().cint,
+      retain
+    ),
+    "mosquitto_will_set"
+  )
+
+proc setWill*(client: LowLevelClient; topic: string; payload: string;
+              qos = qos0; retain = false): MqttResult[MqttOk] =
+  ## Configure a text MQTT Will message on the libmosquitto handle.
+  var bytes = newSeq[byte](payload.len)
+  if payload.len > 0:
+    copyMem(addr bytes[0], unsafeAddr payload[0], payload.len)
+
+  result = setWill(client, topic, bytes, qos = qos, retain = retain)
+
+proc clearWill*(client: LowLevelClient): MqttResult[MqttOk] =
+  ## Clear any MQTT Will configured on the libmosquitto handle.
+  let rawRes = requireOpen(client, "clear MQTT will")
+  if rawRes.isErr:
+    return err(rawRes.error)
+
+  result = checkMosq(mosquitto_will_clear(rawRes.get()), "mosquitto_will_clear")
+
 proc validateSubscribeTopic*(topicFilter: string): MqttResult[MqttOk] =
   ## Validate a topic filter for SUBSCRIBE.
   ##

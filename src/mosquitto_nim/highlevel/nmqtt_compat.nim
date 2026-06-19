@@ -87,8 +87,6 @@ proc ensureSupportedConfig(ctx: MqttCtx) =
     ctx.raiseCompat(invalidState("start nmqtt-compatible client", "SSL/TLS is not wired yet"))
   if ctx.sslCert.len > 0 or ctx.sslKey.len > 0:
     ctx.raiseCompat(invalidState("start nmqtt-compatible client", "client certificate auth is not wired yet"))
-  if ctx.willTopic.len > 0:
-    ctx.raiseCompat(invalidState("start nmqtt-compatible client", "will configuration is not wired yet"))
 
 proc ensureClient(ctx: MqttCtx) =
   ctx.requireCtx("ensure nmqtt-compatible client")
@@ -212,6 +210,8 @@ proc set_ssl_certificates*(ctx: MqttCtx; sslCert: string; sslKey: string) =
 proc set_will*(ctx: MqttCtx; topic, msg: string; qos = 0; retain = false) =
   ctx.requireCtx("set MQTT will")
   discard ctx.qosFromInt(qos, "set MQTT will")
+  if topic.len == 0:
+    ctx.raiseCompat(invalidArgument("set MQTT will", "topic must not be empty"))
   ctx.willTopic = topic
   ctx.willMessage = msg
   ctx.willQos = qos
@@ -238,12 +238,18 @@ proc connect*(ctx: MqttCtx) {.async.} =
     return
 
   ctx.ensureClient()
+  var will = noWill()
+  if ctx.willTopic.len > 0:
+    let willQos = ctx.qosFromInt(ctx.willQos, "connect MQTT client will")
+    will = mqttWill(ctx.willTopic, ctx.willMessage, qos = willQos, retain = ctx.willRetain)
+
   let connectRes = ctx.client.connect(
     ctx.host,
     port = ctx.port,
     keepalive = ctx.keepalive,
     username = ctx.username,
-    password = ctx.password
+    password = ctx.password,
+    will = will
   )
   if connectRes.isErr:
     ctx.raiseCompat(connectRes.error)

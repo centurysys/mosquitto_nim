@@ -114,6 +114,21 @@ suite "mosquitto_nim lowlevel smoke test":
     check cleanupLibrary().isOk
 
 
+  test "will can be configured and cleared":
+    check initLibrary().isOk
+
+    let clientRes = newLowLevelClient("mosquitto_nim_step15_will")
+    check clientRes.isOk
+    let client = clientRes.get()
+
+    check setWill(client, "mosquitto_nim/will", "offline", qos1, retain = true).isOk
+    check clearWill(client).isOk
+    check setWill(client, "", "offline", qos0, retain = false).isErr
+
+    check closeLowLevelClient(client).isOk
+    check cleanupLibrary().isOk
+
+
 suite "mosquitto_nim worker value types":
   test "worker command constructors keep Nim-owned payload bytes":
     let connectCmd = connectCommand(
@@ -128,6 +143,13 @@ suite "mosquitto_nim worker value types":
     check connectCmd.username == "worker-user"
     check connectCmd.password == "worker-pass"
     check connectCmd.summary().contains("auth=true")
+
+    let will = mqttWill("mosquitto_nim/will", "offline", qos1, retain = true)
+    let willConnectCmd = connectCommand("127.0.0.1", will = will, id = 8)
+    check willConnectCmd.will.enabled
+    check willConnectCmd.will.topic == "mosquitto_nim/will"
+    check willConnectCmd.will.payload == bytesFromString("offline")
+    check willConnectCmd.summary().contains("will=true")
 
     let cmd = publishCommand("mosquitto_nim/worker/test", "hello-worker", qos1, retain = true, id = 7)
 
@@ -937,6 +959,7 @@ suite "mosquitto_nim nmqtt compatibility facade":
     ctx.set_host("127.0.0.1", 1883)
     ctx.set_ping_interval(30)
     ctx.set_auth("compat-user", "compat-pass")
+    ctx.set_will("mosquitto_nim/compat/will", "offline", qos = 1, retain = true)
     check ctx.lastError().isNone
 
 
@@ -951,6 +974,7 @@ when getEnv("MOSQUITTO_NIM_TEST_BROKER") == "1":
         let ctx = newMqttCtx("mosquitto_nim_step13_nmqtt")
         ctx.set_host(host, port)
         ctx.set_ping_interval(30)
+        ctx.set_will("mosquitto_nim/step15/will", "offline", qos = 1, retain = false)
 
         var receivedTopic = ""
         var receivedPayload = ""

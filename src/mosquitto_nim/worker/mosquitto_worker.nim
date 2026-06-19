@@ -122,6 +122,15 @@ proc handleCommand(command: sink MqttCommand; running: var bool;
       sendWorkerError(eventQueue, authRes.error, cmd.id)
       return
 
+    let willRes = if cmd.will.enabled:
+        setWill(client, cmd.will.topic, cmd.will.payload, cmd.will.qos, cmd.will.retain)
+      else:
+        clearWill(client)
+    if willRes.isErr:
+      pendingConnectId = 0
+      sendWorkerError(eventQueue, willRes.error, cmd.id)
+      return
+
     pendingConnectId = cmd.id
     let connectRes = connectLowLevelClient(client, cmd.host, cmd.port, cmd.keepalive)
     if connectRes.isErr:

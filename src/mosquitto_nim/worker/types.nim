@@ -45,6 +45,7 @@ type
     keepalive*: int
     username*: string
     password*: string
+    will*: MqttWill
     topic*: string
     payload*: seq[byte]
     qos*: MqttQos
@@ -68,14 +69,6 @@ type
 # ------------------------------------------------------------------------------
 # Payload helpers
 # ------------------------------------------------------------------------------
-proc bytesFromString*(payload: string): seq[byte] =
-  ## Convert a Nim string to MQTT payload bytes.
-  if payload.len == 0:
-    return @[]
-
-  result = newSeq[byte](payload.len)
-  copyMem(addr result[0], unsafeAddr payload[0], payload.len)
-
 proc payloadString*(command: MqttCommand): string =
   ## Return command payload bytes as a Nim string.
   ##
@@ -91,7 +84,9 @@ proc payloadString*(command: MqttCommand): string =
 # Command constructors
 # ------------------------------------------------------------------------------
 proc connectCommand*(host: string; port = 1883; keepalive = 60;
-                     username = ""; password = ""; id = 0): MqttCommand =
+                     username = ""; password = "";
+                     will: MqttWill = MqttWill(enabled: false, qos: qos0);
+                     id = 0): MqttCommand =
   result = MqttCommand(
     id: id,
     kind: mckConnect,
@@ -100,6 +95,7 @@ proc connectCommand*(host: string; port = 1883; keepalive = 60;
     keepalive: keepalive,
     username: username,
     password: password,
+    will: will,
     qos: qos0
   )
 
@@ -206,7 +202,8 @@ proc summary*(command: MqttCommand): string =
   case command.kind
   of mckConnect:
     let auth = if command.username.len > 0: ", auth=true" else: ""
-    result = &"{command.kind}(id={command.id}, host={command.host}, port={command.port}{auth})"
+    let will = if command.will.enabled: ", will=true" else: ""
+    result = &"{command.kind}(id={command.id}, host={command.host}, port={command.port}{auth}{will})"
   of mckPublish:
     result = &"{command.kind}(id={command.id}, topic={command.topic}, payloadLen={command.payload.len}, qos={command.qos}, retain={command.retain})"
   of mckSubscribe, mckUnsubscribe:
