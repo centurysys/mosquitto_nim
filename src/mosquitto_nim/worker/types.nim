@@ -21,7 +21,17 @@ type
     mckUnsubscribe
     mckStop
 
+  MqttConnectionState* = enum
+    mcsDisconnected
+    mcsConnecting
+    mcsConnected
+    mcsDisconnecting
+    mcsStopping
+    mcsStopped
+    mcsError
+
   MqttEventKind* = enum
+    mevStateChanged
     mevConnected
     mevDisconnected
     mevPublishAccepted
@@ -61,6 +71,7 @@ type
     ## reason codes, and failed commands are part of the client's state machine.
     commandId*: int
     kind*: MqttEventKind
+    state*: MqttConnectionState
     mid*: int
     message*: MqttMessage
     error*: MqttError
@@ -68,6 +79,16 @@ type
     reasonCode*: int
     flags*: int
     grantedQos*: seq[int]
+
+
+# ------------------------------------------------------------------------------
+# Connection state helpers
+# ------------------------------------------------------------------------------
+proc isConnected*(state: MqttConnectionState): bool {.inline.} =
+  result = state == mcsConnected
+
+proc isTerminal*(state: MqttConnectionState): bool {.inline.} =
+  result = state in {mcsStopped, mcsError}
 
 # ------------------------------------------------------------------------------
 # Payload helpers
@@ -163,10 +184,19 @@ proc unsubscribeCommand*(topicFilter: string; id = 0): MqttCommand =
 # ------------------------------------------------------------------------------
 # Event constructors
 # ------------------------------------------------------------------------------
+proc stateChangedEvent*(state: MqttConnectionState; commandId = 0; detail = ""): MqttEvent =
+  result = MqttEvent(
+    commandId: commandId,
+    kind: mevStateChanged,
+    state: state,
+    detail: detail
+  )
+
 proc connectedEvent*(commandId = 0; reasonCode = 0; flags = 0): MqttEvent =
   result = MqttEvent(
     commandId: commandId,
     kind: mevConnected,
+    state: mcsConnected,
     reasonCode: reasonCode,
     flags: flags
   )
@@ -175,6 +205,7 @@ proc disconnectedEvent*(commandId = 0; detail = ""; reasonCode = 0): MqttEvent =
   result = MqttEvent(
     commandId: commandId,
     kind: mevDisconnected,
+    state: mcsDisconnected,
     detail: detail,
     reasonCode: reasonCode
   )
@@ -217,7 +248,7 @@ proc errorEvent*(error: MqttError; commandId = 0): MqttEvent =
   result = MqttEvent(commandId: commandId, kind: mevError, error: error)
 
 proc stoppedEvent*(commandId = 0): MqttEvent =
-  result = MqttEvent(commandId: commandId, kind: mevStopped)
+  result = MqttEvent(commandId: commandId, kind: mevStopped, state: mcsStopped)
 
 # ------------------------------------------------------------------------------
 # Debug formatting
@@ -239,6 +270,8 @@ proc summary*(command: MqttCommand): string =
 
 proc summary*(event: MqttEvent): string =
   case event.kind
+  of mevStateChanged:
+    result = &"{event.kind}(commandId={event.commandId}, state={event.state}, detail={event.detail})"
   of mevMessageReceived:
     result = &"{event.kind}(commandId={event.commandId}, topic={event.message.topic}, payloadLen={event.message.payload.len})"
   of mevError:
@@ -248,8 +281,8 @@ proc summary*(event: MqttEvent): string =
   of mevSubscribed:
     result = &"{event.kind}(commandId={event.commandId}, mid={event.mid}, grantedQos={event.grantedQos})"
   of mevDisconnected:
-    result = &"{event.kind}(commandId={event.commandId}, detail={event.detail}, reasonCode={event.reasonCode})"
+    result = &"{event.kind}(commandId={event.commandId}, state={event.state}, detail={event.detail}, reasonCode={event.reasonCode})"
   of mevConnected:
-    result = &"{event.kind}(commandId={event.commandId}, reasonCode={event.reasonCode}, flags={event.flags})"
+    result = &"{event.kind}(commandId={event.commandId}, state={event.state}, reasonCode={event.reasonCode}, flags={event.flags})"
   of mevStopped:
     result = &"{event.kind}(commandId={event.commandId})"

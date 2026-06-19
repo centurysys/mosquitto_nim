@@ -70,6 +70,10 @@ proc sendWorkerError(eventQueue: ThreadQueue[MqttEvent]; error: MqttError;
                      commandId = 0) {.raises: [].} =
   sendWorkerEvent(eventQueue, errorEvent(error, commandId))
 
+proc sendWorkerState(eventQueue: ThreadQueue[MqttEvent]; state: MqttConnectionState;
+                     commandId = 0; detail = "") {.raises: [].} =
+  sendWorkerEvent(eventQueue, stateChangedEvent(state, commandId = commandId, detail = detail))
+
 proc flushLoop(client: LowLevelClient; eventQueue: ThreadQueue[MqttEvent];
                loopActive: var bool; loopTimeoutMs: int; rounds: int) {.raises: [].} =
   ## Run a few manual-loop iterations and report failures as worker errors.
@@ -100,11 +104,13 @@ proc handleCommand(command: sink MqttCommand; running: var bool;
 
   case cmd.kind
   of mckStop:
+    sendWorkerState(eventQueue, mcsStopping, commandId = cmd.id, detail = "stop requested")
     if loopActive:
       discard disconnectLowLevelClient(client)
       flushLoop(client, eventQueue, loopActive, loopTimeoutMs, rounds = 2)
       loopActive = false
     running = false
+    sendWorkerState(eventQueue, mcsStopped, commandId = cmd.id, detail = "worker stopped")
     sendWorkerEvent(eventQueue, stoppedEvent(commandId = cmd.id))
 
   of mckConnect:
@@ -144,6 +150,7 @@ proc handleCommand(command: sink MqttCommand; running: var bool;
       return
 
     pendingConnectId = cmd.id
+    sendWorkerState(eventQueue, mcsConnecting, commandId = cmd.id, detail = "connect requested")
     let connectRes = connectLowLevelClient(client, cmd.host, cmd.port, cmd.keepalive)
     if connectRes.isErr:
       pendingConnectId = 0
@@ -155,10 +162,12 @@ proc handleCommand(command: sink MqttCommand; running: var bool;
 
   of mckDisconnect:
     if not loopActive:
+      sendWorkerState(eventQueue, mcsDisconnected, commandId = cmd.id, detail = "already disconnected")
       sendWorkerEvent(eventQueue, disconnectedEvent(commandId = cmd.id, detail = "already disconnected"))
       return
 
     pendingDisconnectId = cmd.id
+    sendWorkerState(eventQueue, mcsDisconnecting, commandId = cmd.id, detail = "disconnect requested")
     let disconnectRes = disconnectLowLevelClient(client)
     if disconnectRes.isErr:
       pendingDisconnectId = 0
@@ -224,9 +233,12 @@ proc handleCommand(command: sink MqttCommand; running: var bool;
 proc workerMain(args: MqttWorkerArgs) {.thread.} =
   var stopCommandId = 0
 
+  sendWorkerState(args.eventQueue, mcsDisconnected, detail = "worker started")
+
   let initRes = initLibrary()
   if initRes.isErr:
     sendWorkerError(args.eventQueue, initRes.error)
+    sendWorkerState(args.eventQueue, mcsStopped, commandId = stopCommandId, detail = "worker stopped after init failure")
     sendWorkerEvent(args.eventQueue, stoppedEvent(commandId = stopCommandId))
     return
 
@@ -234,6 +246,7 @@ proc workerMain(args: MqttWorkerArgs) {.thread.} =
   if clientRes.isErr:
     sendWorkerError(args.eventQueue, clientRes.error)
     discard cleanupLibrary()
+    sendWorkerState(args.eventQueue, mcsStopped, commandId = stopCommandId, detail = "worker stopped after client creation failure")
     sendWorkerEvent(args.eventQueue, stoppedEvent(commandId = stopCommandId))
     return
 
@@ -257,18 +270,21 @@ proc workerMain(args: MqttWorkerArgs) {.thread.} =
       pendingConnectId = 0
       if event.reasonCode == 0:
         loopActive = true
+        sendWorkerState(args.eventQueue, mcsConnected, commandId = commandId, detail = "connect callback")
         sendWorkerEvent(
           args.eventQueue,
           connectedEvent(commandId = commandId, reasonCode = event.reasonCode, flags = event.flags)
         )
       else:
         loopActive = false
+        sendWorkerState(args.eventQueue, mcsError, commandId = commandId, detail = "connect rejected")
         sendWorkerError(args.eventQueue, protocolReason("MQTT connect callback", event.reasonCode), commandId)
 
     of lleDisconnected:
       let commandId = pendingDisconnectId
       pendingDisconnectId = 0
       loopActive = false
+      sendWorkerState(args.eventQueue, mcsDisconnected, commandId = commandId, detail = "disconnect callback")
       sendWorkerEvent(
         args.eventQueue,
         disconnectedEvent(commandId = commandId, reasonCode = event.reasonCode)
@@ -335,6 +351,7 @@ proc workerMain(args: MqttWorkerArgs) {.thread.} =
         let loopRes = loopLowLevelClient(client, timeoutMs = args.loopTimeoutMs)
         if loopRes.isErr:
           loopActive = false
+          sendWorkerState(args.eventQueue, mcsError, detail = "mosquitto loop error")
           sendWorkerError(args.eventQueue, loopRes.error)
       else:
         sleep(args.idleSleepMs)
@@ -347,6 +364,9 @@ proc workerMain(args: MqttWorkerArgs) {.thread.} =
   if loopActive:
     discard disconnectLowLevelClient(client)
     loopActive = false
+
+  if running:
+    sendWorkerState(args.eventQueue, mcsStopped, commandId = stopCommandId, detail = "worker stopped after loop exit")
 
   discard clearControlSink(client)
   discard clearMessageSink(client)

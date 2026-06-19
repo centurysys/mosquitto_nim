@@ -55,6 +55,7 @@ type
     started: bool
     running: bool
     connected: bool
+    state: MqttConnectionState
     stopped: bool
     pendingCount: int
     subscriptions: seq[MqttSubscription]
@@ -110,18 +111,25 @@ proc ensureClient(ctx: MqttCtx) =
   ctx.started = true
   ctx.running = false
   ctx.connected = false
+  ctx.state = mcsDisconnected
   ctx.stopped = false
 
 proc handleCompatEvent(ctx: MqttCtx; event: MqttEvent): Future[void] {.async.} =
   case event.kind
+  of mevStateChanged:
+    ctx.state = event.state
+    ctx.connected = event.state.isConnected()
   of mevConnected:
+    ctx.state = mcsConnected
     ctx.connected = true
   of mevDisconnected:
+    ctx.state = mcsDisconnected
     ctx.connected = false
   of mevPublishCompleted, mevSubscribed, mevUnsubscribed:
     if ctx.pendingCount > 0:
       dec ctx.pendingCount
   of mevStopped:
+    ctx.state = mcsStopped
     ctx.running = false
     ctx.stopped = true
   of mevError:
@@ -272,8 +280,13 @@ proc connect*(ctx: MqttCtx) {.async.} =
   if connectRes.isErr:
     ctx.raiseCompat(connectRes.error)
 
+  ctx.state = mcsConnecting
+  ctx.connected = false
+
   let connected = await ctx.waitForControlEvent(connectRes.get(), mevConnected, ctx.connectTimeoutMs)
   if not connected:
+    ctx.state = mcsError
+    ctx.connected = false
     ctx.raiseCompat(invalidState("connect MQTT client", "connect timeout"))
 
 proc start*(ctx: MqttCtx) {.async.} =
@@ -300,10 +313,12 @@ proc disconnect*(ctx: MqttCtx) {.async.} =
     return
 
   if ctx.connected:
+    ctx.state = mcsDisconnecting
     let disconnectRes = ctx.client.disconnect()
     if disconnectRes.isErr:
       ctx.raiseCompat(disconnectRes.error)
 
+  ctx.state = mcsStopping
   let stopRes = ctx.client.requestStop()
   if stopRes.isErr:
     ctx.raiseCompat(stopRes.error)
@@ -403,8 +418,13 @@ proc unsubscribe*(ctx: MqttCtx; topic: string): Future[void] {.async.} =
       ctx.raiseCompat(unsubRes.error)
     inc ctx.pendingCount
 
+proc currentState*(ctx: MqttCtx): MqttConnectionState =
+  if ctx.isNil:
+    return mcsStopped
+  result = ctx.state
+
 proc isConnected*(ctx: MqttCtx): bool =
-  result = not ctx.isNil and ctx.connected
+  result = not ctx.isNil and ctx.state.isConnected()
 
 proc msgQueue*(ctx: MqttCtx): int =
   if ctx.isNil:

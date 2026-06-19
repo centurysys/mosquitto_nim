@@ -391,19 +391,24 @@ suite "mosquitto_nim highlevel client":
         return false
 
       let stopId = stopIdRes.get()
-      let eventRes = await client.nextEvent()
-      check eventRes.isOk
-      if eventRes.isErr:
-        discard client.joinMqttClient()
-        return false
+      var stoppedEvent: Option[MqttEvent] = none(MqttEvent)
+      for _ in 0 ..< 200:
+        let eventRes = await client.nextEvent()
+        check eventRes.isOk
+        if eventRes.isErr:
+          break
 
-      let event = eventRes.get()
-      check event.kind == mevStopped
-      check event.commandId == stopId
+        let event = eventRes.get()
+        if event.kind == mevStopped and event.commandId == stopId:
+          stoppedEvent = some(event)
+          break
+
+      check stoppedEvent.isSome
+      check client.currentState() == mcsStopped
 
       check client.joinMqttClient().isOk
       check client.isClosed
-      return event.kind == mevStopped and event.commandId == stopId
+      return stoppedEvent.isSome
 
     check waitFor scenario()
 
@@ -1319,5 +1324,128 @@ when getEnv("MOSQUITTO_NIM_TEST_BROKER") == "1":
         await ctx.disconnect()
         check not ctx.isConnected()
         return receivedTopic == topic and receivedPayload == "hello-v5-user-property-nmqtt-compat"
+
+      check waitFor scenario()
+
+
+suite "mosquitto_nim connection state tracking":
+  test "connection state helpers and state events are available":
+    check mcsConnected.isConnected()
+    check not mcsConnecting.isConnected()
+    check mcsStopped.isTerminal()
+    check mcsError.isTerminal()
+
+    let ev = stateChangedEvent(mcsConnecting, commandId = 501, detail = "unit-test")
+    check ev.kind == mevStateChanged
+    check ev.state == mcsConnecting
+    check ev.commandId == 501
+    check ev.summary().contains("mcsConnecting")
+
+  test "highlevel client tracks stop state through async events":
+    proc scenario(): Future[bool] {.async.} =
+      let clientRes = startMqttClient("mosquitto_nim_step22_state_stop", loopTimeoutMs = 10, pollMs = 1)
+      check clientRes.isOk
+      if clientRes.isErr:
+        return false
+
+      let client = clientRes.get()
+      check client.currentState() == mcsDisconnected
+      check not client.isConnected()
+
+      let stopIdRes = client.requestStop()
+      check stopIdRes.isOk
+      if stopIdRes.isErr:
+        discard client.joinMqttClient()
+        return false
+      check client.currentState() == mcsStopping
+
+      var sawStoppedState = false
+      var sawStoppedEvent = false
+      for _ in 0 ..< 200:
+        let eventRes = await client.nextEvent()
+        check eventRes.isOk
+        if eventRes.isErr:
+          break
+
+        let event = eventRes.get()
+        if event.kind == mevStateChanged and event.state == mcsStopped:
+          sawStoppedState = true
+        if event.kind == mevStopped and event.commandId == stopIdRes.get():
+          sawStoppedEvent = true
+        if sawStoppedState and sawStoppedEvent:
+          break
+
+      check sawStoppedState
+      check sawStoppedEvent
+      check client.currentState() == mcsStopped
+      check client.joinMqttClient().isOk
+      check client.currentState() == mcsStopped
+      return sawStoppedState and sawStoppedEvent
+
+    check waitFor scenario()
+
+
+when getEnv("MOSQUITTO_NIM_TEST_BROKER") == "1":
+  suite "mosquitto_nim connection state broker test":
+    test "highlevel client tracks connect and disconnect states":
+      proc waitForEvent(client: MqttClient; wantedKind: MqttEventKind;
+                        commandId: int; maxRounds = 300): Future[Option[MqttEvent]] {.async.} =
+        for _ in 0 ..< maxRounds:
+          let eventRes = await client.nextEvent()
+          check eventRes.isOk
+          if eventRes.isErr:
+            break
+
+          let event = eventRes.get()
+          if event.kind == wantedKind and event.commandId == commandId:
+            return some(event)
+
+        return none(MqttEvent)
+
+      proc scenario(): Future[bool] {.async.} =
+        let host = getEnv("MOSQUITTO_NIM_TEST_HOST", "127.0.0.1")
+        let port = parseInt(getEnv("MOSQUITTO_NIM_TEST_PORT", "1883"))
+
+        let clientRes = startMqttClient("mosquitto_nim_step22_state_broker", loopTimeoutMs = 10, pollMs = 1)
+        check clientRes.isOk
+        if clientRes.isErr:
+          return false
+
+        let client = clientRes.get()
+        check client.currentState() == mcsDisconnected
+
+        let connectIdRes = client.connect(host, port = port, keepalive = 30)
+        check connectIdRes.isOk
+        if connectIdRes.isErr:
+          discard client.requestStop()
+          discard client.joinMqttClient()
+          return false
+        check client.currentState() == mcsConnecting
+
+        let connectedEvent = await waitForEvent(client, mevConnected, connectIdRes.get())
+        check connectedEvent.isSome
+        check client.currentState() == mcsConnected
+        check client.isConnected()
+
+        let disconnectIdRes = client.disconnect()
+        check disconnectIdRes.isOk
+        if disconnectIdRes.isErr:
+          discard client.requestStop()
+          discard client.joinMqttClient()
+          return false
+        check client.currentState() == mcsDisconnecting
+
+        let disconnectedEvent = await waitForEvent(client, mevDisconnected, disconnectIdRes.get())
+        check disconnectedEvent.isSome
+        check client.currentState() == mcsDisconnected
+        check not client.isConnected()
+
+        let stopIdRes = client.requestStop()
+        check stopIdRes.isOk
+        let stoppedEvent = await waitForEvent(client, mevStopped, stopIdRes.get())
+        check stoppedEvent.isSome
+        check client.currentState() == mcsStopped
+        check client.joinMqttClient().isOk
+        return connectedEvent.isSome and disconnectedEvent.isSome and stoppedEvent.isSome
 
       check waitFor scenario()

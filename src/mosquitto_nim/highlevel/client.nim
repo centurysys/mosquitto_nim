@@ -41,6 +41,7 @@ type
     bridge: MqttAsyncBridge
     dispatcher: MqttDispatcher
     nextCommandId: int
+    state: MqttConnectionState
     closed: bool
 
 # ------------------------------------------------------------------------------
@@ -57,6 +58,22 @@ proc ensureOpen(client: MqttClient; context: string): MqttResult[MqttOk] =
     return err(invalidState(context, "async bridge is closed"))
 
   result = ok(MqttOk())
+
+proc updateStateFromEvent(client: MqttClient; event: MqttEvent) =
+  if client.isNil:
+    return
+
+  case event.kind
+  of mevStateChanged:
+    client.state = event.state
+  of mevConnected:
+    client.state = mcsConnected
+  of mevDisconnected:
+    client.state = mcsDisconnected
+  of mevStopped:
+    client.state = mcsStopped
+  else:
+    discard
 
 proc allocateCommandId(client: MqttClient): int =
   ## Allocate a positive command id for correlating command-side results/events.
@@ -120,6 +137,7 @@ proc startMqttClient*(clientId = ""; cleanSession = true;
   client.bridge = bridgeRes.get()
   client.dispatcher = newMqttDispatcher()
   client.nextCommandId = 0
+  client.state = mcsDisconnected
   client.closed = false
   result = ok(client)
 
@@ -129,6 +147,14 @@ proc isClosed*(client: MqttClient): bool {.inline.} =
 proc isStarted*(client: MqttClient): bool {.inline.} =
   result = not client.isNil and not client.closed and
            not client.worker.isNil and client.worker.isStarted
+
+proc currentState*(client: MqttClient): MqttConnectionState {.inline.} =
+  if client.isNil:
+    return mcsStopped
+  result = client.state
+
+proc isConnected*(client: MqttClient): bool {.inline.} =
+  result = not client.isNil and client.state.isConnected()
 
 proc joinMqttClient*(client: MqttClient): MqttResult[MqttOk] =
   ## Join the worker thread after a Stop command has been processed.
@@ -148,6 +174,8 @@ proc joinMqttClient*(client: MqttClient): MqttResult[MqttOk] =
       return err(joinRes.error)
 
   client.closed = true
+  if client.state != mcsError:
+    client.state = mcsStopped
   result = ok(MqttOk())
 
 proc mqttWorker*(client: MqttClient): MqttWorker =
@@ -245,14 +273,20 @@ proc connect*(client: MqttClient; host: string; port = 1883;
     will = will
   )
   result = client.sendClientCommand(move cmd, "connect MQTT client")
+  if result.isOk:
+    client.state = mcsConnecting
 
 proc disconnect*(client: MqttClient): MqttResult[int] =
   var cmd = disconnectCommand()
   result = client.sendClientCommand(move cmd, "disconnect MQTT client")
+  if result.isOk:
+    client.state = mcsDisconnecting
 
 proc requestStop*(client: MqttClient): MqttResult[int] =
   var cmd = stopCommand()
   result = client.sendClientCommand(move cmd, "stop MQTT client")
+  if result.isOk:
+    client.state = mcsStopping
 
 proc publish*(client: MqttClient; topic: string; payload: openArray[byte];
               qos = qos0; retain = false): MqttResult[int] =
@@ -360,7 +394,10 @@ proc nextEvent*(client: MqttClient): Future[MqttResult[MqttEvent]] {.async.} =
   if client.bridge.isNil:
     return err(invalidState("MQTT client nextEvent", "async bridge is nil"))
 
-  return await client.bridge.nextEvent()
+  let eventRes = await client.bridge.nextEvent()
+  if eventRes.isOk:
+    client.updateStateFromEvent(eventRes.get())
+  return eventRes
 
 proc drainEvents*(client: MqttClient): MqttResult[seq[MqttEvent]] =
   ## Drain currently queued worker events without waiting.
@@ -371,7 +408,14 @@ proc drainEvents*(client: MqttClient): MqttResult[seq[MqttEvent]] =
   if client.bridge.isNil:
     return err(invalidState("MQTT client drainEvents", "async bridge is nil"))
 
-  result = client.bridge.drainEvents()
+  let drainRes = client.bridge.drainEvents()
+  if drainRes.isErr:
+    return err(drainRes.error)
+
+  for event in drainRes.get():
+    client.updateStateFromEvent(event)
+
+  result = drainRes
 
 # ------------------------------------------------------------------------------
 # Dispatch API
