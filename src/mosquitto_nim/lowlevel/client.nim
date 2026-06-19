@@ -266,6 +266,27 @@ proc clearCallbackError*(client: LowLevelClient): MqttResult[MqttOk] =
   result = ok(MqttOk())
 
 
+
+proc setProtocolVersion*(client: LowLevelClient;
+                         protocolVersion = mpv311): MqttResult[MqttOk] =
+  ## Configure the MQTT protocol version on the libmosquitto handle.
+  ##
+  ## This must be called before connectLowLevelClient().  The default for
+  ## mosquitto_nim remains MQTT 3.1.1 for nmqtt compatibility, while callers can
+  ## explicitly select MQTT 5 when the broker requires it.
+  let rawRes = requireOpen(client, "set MQTT protocol version")
+  if rawRes.isErr:
+    return err(rawRes.error)
+
+  result = checkMosq(
+    mosquitto_int_option(
+      rawRes.get(),
+      MOSQ_OPT_PROTOCOL_VERSION,
+      protocolVersion.toInt().cint
+    ),
+    "mosquitto_int_option(MOSQ_OPT_PROTOCOL_VERSION)"
+  )
+
 proc optionalCString(value: string): cstring =
   ## Convert an optional Nim string to the nil-or-cstring style used by
   ## libmosquitto configuration APIs.

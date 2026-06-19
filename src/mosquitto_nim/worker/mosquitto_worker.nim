@@ -116,6 +116,12 @@ proc handleCommand(command: sink MqttCommand; running: var bool;
       )
       return
 
+    let protoRes = setProtocolVersion(client, cmd.protocolVersion)
+    if protoRes.isErr:
+      pendingConnectId = 0
+      sendWorkerError(eventQueue, protoRes.error, cmd.id)
+      return
+
     let tlsRes = setTls(client, cmd.tls)
     if tlsRes.isErr:
       pendingConnectId = 0

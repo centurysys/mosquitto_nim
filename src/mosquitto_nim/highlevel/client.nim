@@ -230,13 +230,15 @@ proc sendCommand*(client: MqttClient; command: sink MqttCommand): MqttResult[int
   result = client.sendClientCommand(move command, "send MQTT client command")
 
 proc connect*(client: MqttClient; host: string; port = 1883;
-              keepalive = 60; username = ""; password = "";
+              keepalive = 60; protocolVersion = mpv311;
+              username = ""; password = "";
               tls: MqttTlsConfig = MqttTlsConfig(enabled: false);
               will: MqttWill = MqttWill(enabled: false, qos: qos0)): MqttResult[int] =
   var cmd = connectCommand(
     host,
     port = port,
     keepalive = keepalive,
+    protocolVersion = protocolVersion,
     username = username,
     password = password,
     tls = tls,

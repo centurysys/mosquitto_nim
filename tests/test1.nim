@@ -149,12 +149,31 @@ suite "mosquitto_nim lowlevel smoke test":
     check cleanupLibrary().isOk
 
 
+  test "protocol version can be configured on lowlevel client":
+    check initLibrary().isOk
+
+    let clientRes = newLowLevelClient("mosquitto_nim_step17_protocol")
+    check clientRes.isOk
+    let client = clientRes.get()
+
+    check mpv311.toInt() == 4
+    check mpv5.toInt() == 5
+    check $mpv311 == "MQTT 3.1.1"
+    check $mpv5 == "MQTT 5"
+    check setProtocolVersion(client, mpv311).isOk
+    check setProtocolVersion(client, mpv5).isOk
+
+    check closeLowLevelClient(client).isOk
+    check cleanupLibrary().isOk
+
+
 suite "mosquitto_nim worker value types":
   test "worker command constructors keep Nim-owned payload bytes":
     let connectCmd = connectCommand(
       "127.0.0.1",
       port = 1883,
       keepalive = 30,
+      protocolVersion = mpv5,
       username = "worker-user",
       password = "worker-pass",
       tls = mqttTls(certfile = "worker.crt", keyfile = "worker.key"),
@@ -163,6 +182,7 @@ suite "mosquitto_nim worker value types":
     check connectCmd.kind == mckConnect
     check connectCmd.username == "worker-user"
     check connectCmd.password == "worker-pass"
+    check connectCmd.protocolVersion == mpv5
     check connectCmd.tls.enabled
     check connectCmd.tls.certfile == "worker.crt"
     check connectCmd.summary().contains("auth=true")

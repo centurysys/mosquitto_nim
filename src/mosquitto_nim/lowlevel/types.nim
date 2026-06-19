@@ -112,6 +112,13 @@ proc `$`*(version: MqttVersion): string =
 proc toInt*(protocolVersion: MqttProtocolVersion): int =
   result = ord(protocolVersion)
 
+proc `$`*(protocolVersion: MqttProtocolVersion): string =
+  case protocolVersion
+  of mpv311:
+    result = "MQTT 3.1.1"
+  of mpv5:
+    result = "MQTT 5"
+
 proc toInt*(qos: MqttQos): int =
   result = ord(qos)
 

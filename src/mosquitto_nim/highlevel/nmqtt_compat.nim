@@ -38,6 +38,7 @@ type
     host: string
     port: int
     keepalive: int
+    protocolVersion: MqttProtocolVersion
     cleanSession: bool
     sslOn: bool
     username: string
@@ -174,6 +175,7 @@ proc newMqttCtx*(clientId: string): MqttCtx =
   result.host = "127.0.0.1"
   result.port = 1883
   result.keepalive = 60
+  result.protocolVersion = mpv311
   result.cleanSession = true
   result.sslOn = false
   result.connectTimeoutMs = 5000
@@ -181,6 +183,15 @@ proc newMqttCtx*(clientId: string): MqttCtx =
   result.pendingCount = 0
   result.subscriptions = @[]
   result.lastError = none(MqttError)
+
+
+proc setProtocolVersion*(ctx: MqttCtx; protocolVersion: MqttProtocolVersion) =
+  ## Select the MQTT protocol version used for future connections.
+  ##
+  ## The compatibility default is MQTT 3.1.1.  Set mpv5 explicitly for brokers
+  ## that require MQTT v5.
+  ctx.requireCtx("set MQTT protocol version")
+  ctx.protocolVersion = protocolVersion
 
 proc set_ping_interval*(ctx: MqttCtx; txInterval: int) =
   ctx.requireCtx("set MQTT ping interval")
@@ -252,6 +263,7 @@ proc connect*(ctx: MqttCtx) {.async.} =
     ctx.host,
     port = ctx.port,
     keepalive = ctx.keepalive,
+    protocolVersion = ctx.protocolVersion,
     username = ctx.username,
     password = ctx.password,
     tls = tls,
