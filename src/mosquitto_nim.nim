@@ -9,6 +9,7 @@ import ./mosquitto_nim/lowlevel/[
 import ./mosquitto_nim/worker/types as worker_types
 import ./mosquitto_nim/worker/mosquitto_worker
 import ./mosquitto_nim/highlevel/async_bridge
+import ./mosquitto_nim/highlevel/client as highlevel_client
 
 export client
 export errors
@@ -17,3 +18,4 @@ export types
 export worker_types
 export mosquitto_worker
 export async_bridge
+export highlevel_client

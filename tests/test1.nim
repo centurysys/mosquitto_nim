@@ -8,6 +8,7 @@ import mosquitto_nim
 import mosquitto_nim/worker/types
 import mosquitto_nim/worker/mosquitto_worker
 import mosquitto_nim/highlevel/async_bridge
+import mosquitto_nim/highlevel/client as highlevel_client
 import mosquitto_nim/lowlevel/bridge
 import mosquitto_nim/lowlevel/bindings/c_api
 
@@ -276,6 +277,71 @@ suite "mosquitto_nim highlevel async bridge":
 
       check worker.joinMqttWorker().isOk
 
+
+
+suite "mosquitto_nim highlevel client":
+  test "highlevel client can start, request stop, await stopped event, and join":
+    proc scenario(): Future[bool] {.async.} =
+      let clientRes = startMqttClient("mosquitto_nim_step10_client", pollMs = 1)
+      check clientRes.isOk
+      if clientRes.isErr:
+        return false
+
+      let client = clientRes.get()
+      check client.isStarted
+
+      let stopIdRes = client.requestStop()
+      check stopIdRes.isOk
+      if stopIdRes.isErr:
+        discard client.joinMqttClient()
+        return false
+
+      let stopId = stopIdRes.get()
+      let eventRes = await client.nextEvent()
+      check eventRes.isOk
+      if eventRes.isErr:
+        discard client.joinMqttClient()
+        return false
+
+      let event = eventRes.get()
+      check event.kind == mevStopped
+      check event.commandId == stopId
+
+      check client.joinMqttClient().isOk
+      check client.isClosed
+      return event.kind == mevStopped and event.commandId == stopId
+
+    check waitFor scenario()
+
+  test "highlevel client rejects commands after join":
+    let clientRes = startMqttClient("mosquitto_nim_step10_closed", pollMs = 1)
+    check clientRes.isOk
+
+    if clientRes.isOk:
+      let client = clientRes.get()
+      let stopIdRes = client.requestStop()
+      check stopIdRes.isOk
+
+      if stopIdRes.isOk:
+        # Drain the stop event synchronously so join does not race with event use.
+        var sawStopped = false
+        for _ in 0 ..< 100:
+          let drainRes = client.drainEvents()
+          check drainRes.isOk
+          if drainRes.isOk:
+            for event in drainRes.get():
+              if event.kind == mevStopped and event.commandId == stopIdRes.get():
+                sawStopped = true
+                break
+          if sawStopped:
+            break
+          sleep(10)
+        check sawStopped
+
+      check client.joinMqttClient().isOk
+      let pubRes = client.publish("mosquitto_nim/closed", "nope", qos0)
+      check pubRes.isErr
+
 when getEnv("MOSQUITTO_NIM_TEST_BROKER") == "1":
   suite "mosquitto_nim lowlevel broker smoke test":
     test "manual loop can connect, subscribe, publish, and disconnect":
@@ -475,3 +541,113 @@ when getEnv("MOSQUITTO_NIM_TEST_BROKER") == "1":
           sleep(10)
         check sawStopped
         check worker.joinMqttWorker().isOk
+
+    test "highlevel client can connect, subscribe, publish, receive, disconnect, and stop":
+      proc waitForEvent(client: MqttClient; maxRounds: int;
+                        wantedKind: MqttEventKind; commandId = -1;
+                        wantedTopic = ""): Future[Option[MqttEvent]] {.async.} =
+        for _ in 0 ..< maxRounds:
+          let drainRes = client.drainEvents()
+          check drainRes.isOk
+          if drainRes.isOk:
+            for event in drainRes.get():
+              if event.kind == wantedKind:
+                if commandId >= 0 and event.commandId != commandId:
+                  continue
+                if wantedTopic.len > 0:
+                  if event.kind != mevMessageReceived or event.message.topic != wantedTopic:
+                    continue
+                return some(event)
+          await sleepAsync(10)
+
+        return none(MqttEvent)
+
+      proc scenario(): Future[bool] {.async.} =
+        let host = getEnv("MOSQUITTO_NIM_TEST_HOST", "127.0.0.1")
+        let port = parseInt(getEnv("MOSQUITTO_NIM_TEST_PORT", "1883"))
+        let topic = "mosquitto_nim/step10/highlevel/" & $getTime().toUnix() & "_" & $getCurrentProcessId()
+
+        let clientRes = startMqttClient("mosquitto_nim_step10_highlevel", loopTimeoutMs = 10, pollMs = 1)
+        check clientRes.isOk
+        if clientRes.isErr:
+          return false
+
+        let client = clientRes.get()
+
+        let connectIdRes = client.connect(host, port = port, keepalive = 30)
+        check connectIdRes.isOk
+        if connectIdRes.isErr:
+          discard client.joinMqttClient()
+          return false
+        let connectEvent = await waitForEvent(client, 300, mevConnected, connectIdRes.get())
+        check connectEvent.isSome
+
+        let subscribeIdRes = client.subscribe(topic, qos1)
+        check subscribeIdRes.isOk
+        if subscribeIdRes.isErr:
+          discard client.requestStop()
+          discard client.joinMqttClient()
+          return false
+        let subscribeEvent = await waitForEvent(client, 300, mevSubscribed, subscribeIdRes.get())
+        check subscribeEvent.isSome
+
+        let publishIdRes = client.publish(topic, "hello-highlevel", qos1, retain = false)
+        check publishIdRes.isOk
+        if publishIdRes.isErr:
+          discard client.requestStop()
+          discard client.joinMqttClient()
+          return false
+
+        var sawAccepted = false
+        var sawCompleted = false
+        var sawMessage = false
+        var acceptedMid = 0
+        for _ in 0 ..< 400:
+          let drainRes = client.drainEvents()
+          check drainRes.isOk
+          if drainRes.isOk:
+            for event in drainRes.get():
+              case event.kind
+              of mevPublishAccepted:
+                if event.commandId == publishIdRes.get():
+                  sawAccepted = true
+                  acceptedMid = event.mid
+              of mevPublishCompleted:
+                if event.commandId == publishIdRes.get():
+                  sawCompleted = true
+                  if acceptedMid != 0:
+                    check event.mid == acceptedMid
+              of mevMessageReceived:
+                if event.message.topic == topic:
+                  sawMessage = true
+                  check event.message.payloadString() == "hello-highlevel"
+              of mevError:
+                checkpoint event.summary()
+              else:
+                discard
+
+          if sawAccepted and sawCompleted and sawMessage:
+            break
+          await sleepAsync(10)
+
+        check sawAccepted
+        check sawCompleted
+        check sawMessage
+
+        let disconnectIdRes = client.disconnect()
+        check disconnectIdRes.isOk
+        if disconnectIdRes.isOk:
+          let disconnectEvent = await waitForEvent(client, 200, mevDisconnected, disconnectIdRes.get())
+          check disconnectEvent.isSome
+
+        let stopIdRes = client.requestStop()
+        check stopIdRes.isOk
+        if stopIdRes.isOk:
+          let stopEvent = await waitForEvent(client, 200, mevStopped, stopIdRes.get())
+          check stopEvent.isSome
+
+        check client.joinMqttClient().isOk
+        return sawAccepted and sawCompleted and sawMessage
+
+      check waitFor scenario()
+
